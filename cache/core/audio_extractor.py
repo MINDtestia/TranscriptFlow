@@ -4,8 +4,11 @@ import tempfile
 import subprocess
 import yt_dlp
 import certifi
+import logging
+from .error_handling import handle_error, ErrorType
 
 os.environ['SSL_CERT_FILE'] = certifi.where()
+
 def download_youtube_audio(url: str):
     """
     Télécharge l'audio d'une vidéo YouTube en WAV via yt-dlp
@@ -14,7 +17,8 @@ def download_youtube_audio(url: str):
     """
     try:
         if not url.strip():
-            return "ERROR: L'URL est vide."
+            return handle_error(ValueError("URL vide"), ErrorType.INPUT_ERROR,
+                               "Veuillez fournir une URL YouTube valide.")
 
         # On crée un dossier temporaire pour stocker la sortie de yt-dlp
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -49,14 +53,17 @@ def download_youtube_audio(url: str):
             return audio_bytes
 
     except Exception as e:
-        return f"ERROR: Échec du téléchargement/conversion YouTube : {str(e)}"
+        return handle_error(e, ErrorType.PROCESSING_ERROR,
+                           f"Échec du téléchargement ou de la conversion depuis YouTube. Vérifiez l'URL et réessayez.")
+
 def extract_audio_from_mp4(file_path: str) -> str:
     """
     Extrait la piste audio d'un fichier .mp4 local en .wav via FFmpeg.
     Retourne le chemin du fichier audio résultant.
     """
     if not file_path:
-        return "ERROR: Aucun fichier MP4 fourni."
+        return handle_error(ValueError("Aucun fichier fourni"), ErrorType.INPUT_ERROR,
+                           "Aucun fichier vidéo n'a été fourni.")
 
     try:
         base_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -77,4 +84,5 @@ def extract_audio_from_mp4(file_path: str) -> str:
         return audio_path
 
     except Exception as e:
-        return f"ERROR: Échec de l'extraction audio depuis MP4 : {str(e)}"
+        return handle_error(e, ErrorType.PROCESSING_ERROR,
+                           "Échec de l'extraction audio. Vérifiez que le format vidéo est supporté et que ffmpeg est correctement installé.")

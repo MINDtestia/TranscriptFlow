@@ -1,232 +1,580 @@
 import streamlit as st
 import logging
 import tempfile
+import os
+from typing import Optional, Dict, Any, List, Tuple
+import time
+
 from core.transcription import transcribe_or_translate_locally
 from core.gpt_processor import summarize_text, extract_keywords, ask_question_about_text
 from core.utils import create_chapters_from_segments, export_text_file
+from core.error_handling import handle_error, ErrorType, safe_execute
+from core.session_manager import get_session_value, set_session_value
+from core.api_key_manager import api_key_manager
 
-# Gestion de la cache
-@st.cache_data(show_spinner=False)
-def cached_transcribe(file_path, whisper_model, translate):
+# Types personnalisés pour la clarté
+SegmentType = Dict[str, Any]
+TranscriptionResult = Dict[str, Any]
+
+
+# Fonctions de transcription avec cache
+@st.cache_data(show_spinner=False, ttl=3600)
+def cached_transcribe(
+        file_path: str,
+        whisper_model: str,
+        translate: bool
+) -> TranscriptionResult:
+    """
+    Cache le résultat de la transcription pour éviter de refaire le travail.
+
+    Args:
+        file_path: Chemin du fichier audio
+        whisper_model: Modèle Whisper à utiliser
+        translate: Si True, traduit plutôt que transcrire
+
+    Returns:
+        Résultat de la transcription
+    """
     return transcribe_or_translate_locally(file_path, whisper_model, translate)
 
-def do_transcription(uploaded_file, whisper_model, translate=False):
+
+def process_transcription(
+        audio_data: bytes,
+        whisper_model: str,
+        translate: bool = False
+) -> Tuple[bool, str]:
     """
-    Désormais, 'uploaded_file' est un objet Streamlit UploadedFile,
-    et non plus un chemin de fichier.
+    Traite la transcription d'un fichier audio avec une barre de progression.
+
+    Args:
+        audio_data: Contenu du fichier audio en bytes
+        whisper_model: Modèle Whisper à utiliser
+        translate: Si True, traduit plutôt que transcrire
+
+    Returns:
+        (succès, message)
     """
-    if not uploaded_file:
-        st.warning("Veuillez fournir un fichier audio valide.")
-        return
+    if not audio_data:
+        return False, "Aucun fichier audio fourni."
 
     try:
+        # Créer la barre de progression
         progress_bar = st.progress(0)
-        progress_bar.progress(10, text="Préparation...")
+        status_text = st.empty()
+        status_text.text("Préparation du fichier...")
 
-        # 1) Écrire le contenu du fichier téléversé dans un fichier temporaire
+        # Étape 1: Créer un fichier temporaire
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp.write(uploaded_file.read())
-            tmp.flush()
-            temp_filename = tmp.name  # Chemin du fichier temporaire
+            tmp_path = tmp.name
+            tmp.write(audio_data)
 
-        # 2) Transcrire avec Whisper via la fonction cachée
-        with st.spinner("Transcription/Traduction en cours..."):
-            result = cached_transcribe(temp_filename, whisper_model, translate)
+        progress_bar.progress(0.1)
+        status_text.text("Fichier prêt. Chargement du modèle Whisper...")
 
-        progress_bar.progress(80, text="Post-traitement...")
+        # Étape 2: Lancer la transcription
+        def progress_callback(progress: float, message: str):
+            progress_bar.progress(0.1 + progress * 0.8)  # 10% à 90%
+            status_text.text(message)
 
-        error = result["error"]
-        text = result["text"]
-        segments = result["segments"]
+        result = cached_transcribe(tmp_path, whisper_model, translate)
 
-        if error:
-            st.error(error)
-            logging.error(error)
-        else:
-            st.success("Transcription terminée !")
-            st.session_state.transcribed_text = text
-            st.session_state.segments = segments
+        # Étape 3: Traiter le résultat
+        progress_bar.progress(0.9)
+        status_text.text("Finalisation...")
 
-        progress_bar.progress(100)
+        # Nettoyage du fichier temporaire
+        try:
+            os.remove(tmp_path)
+        except:
+            logging.warning(f"Impossible de supprimer le fichier temporaire: {tmp_path}")
+
+        # Vérifier les erreurs
+        if error := result.get("error"):
+            progress_bar.progress(1.0)
+            status_text.text("Erreur lors de la transcription.")
+            return False, error
+
+        # Stockage des résultats dans la session
+        set_session_value("transcribed_text", result["text"])
+        set_session_value("segments", result["segments"])
+        set_session_value("detected_language", result.get("language", ""))
+
+        # Terminer la barre de progression
+        progress_bar.progress(1.0)
+        status_text.text("Transcription terminée!")
+        time.sleep(0.5)  # Laisser le temps de voir le message
+        status_text.empty()
+
+        return True, "Transcription terminée avec succès!"
 
     except Exception as e:
-        logging.error(f"Erreur lors de la transcription : {e}")
-        st.error(f"Erreur : {e}")
+        return False, handle_error(e, ErrorType.PROCESSING_ERROR,
+                                   "Erreur lors de la transcription.")
 
-def do_summarize_text():
-    full_text = st.session_state.transcribed_text
-    if not full_text:
-        st.warning("Aucun texte à résumer.")
-        return
 
-    api_key = st.session_state.openai_api_key
-    gpt_model = st.session_state.get("gpt_model_choice", "gpt-3.5-turbo")
-    style = st.session_state.get("summary_style", "bullet")
-    temp = st.session_state.get("summary_temp", 0.7)
+# Fonctions pour les analyses GPT
+def run_gpt_summary(
+        api_key: str,
+        style: str = "bullet",
+        model: str = "gpt-3.5-turbo",
+        temperature: float = 0.7
+) -> bool:
+    """
+    Exécute l'analyse de résumé GPT sur le texte transcrit.
+
+    Args:
+        api_key: Clé API OpenAI
+        style: Style de résumé ("bullet", "concise", "detailed")
+        model: Modèle GPT à utiliser
+        temperature: Température pour la génération
+
+    Returns:
+        True si succès, False sinon
+    """
+    text = get_session_value("transcribed_text", "")
+    if not text:
+        st.warning("Aucun texte à résumer. Veuillez d'abord faire une transcription.")
+        return False
+
+    if not api_key:
+        st.warning("Clé API OpenAI requise pour cette fonctionnalité.")
+        return False
 
     try:
-        with st.spinner("Génération du résumé..."):
+        with st.spinner("Génération du résumé en cours..."):
             summary = summarize_text(
-                text=full_text,
+                text=text,
                 api_key=api_key,
-                gpt_model=gpt_model,
-                temperature=temp,
+                gpt_model=model,
+                temperature=temperature,
                 style=style
             )
-        st.session_state.summary_result = summary
-        st.success("Résumé généré avec succès.")
-    except Exception as e:
-        logging.error(f"Erreur lors du résumé : {e}")
-        st.error(f"Erreur : {e}")
 
-def do_extract_keywords_gpt():
-    full_text = st.session_state.transcribed_text
-    if not full_text:
-        st.warning("Aucun texte à analyser.")
-        return
-    api_key = st.session_state.openai_api_key
-    gpt_model = st.session_state.get("gpt_model_choice", "gpt-3.5-turbo")
+        set_session_value("summary_result", summary)
+        return True
+
+    except Exception as e:
+        handle_error(e, ErrorType.API_ERROR,
+                     "Erreur lors de la génération du résumé.")
+        return False
+
+
+def run_gpt_keywords(api_key: str, model: str = "gpt-3.5-turbo") -> bool:
+    """
+    Extrait les mots-clés du texte transcrit via GPT.
+
+    Args:
+        api_key: Clé API OpenAI
+        model: Modèle GPT à utiliser
+
+    Returns:
+        True si succès, False sinon
+    """
+    text = get_session_value("transcribed_text", "")
+    if not text:
+        st.warning("Aucun texte pour extraire des mots-clés. Veuillez d'abord faire une transcription.")
+        return False
+
+    if not api_key:
+        st.warning("Clé API OpenAI requise pour cette fonctionnalité.")
+        return False
 
     try:
-        with st.spinner("Extraction des mots-clés..."):
-            keywords = extract_keywords(full_text, api_key, model=gpt_model)
-        st.session_state.keywords_result = keywords
-        st.success("Mots-clés extraits avec succès.")
-    except Exception as e:
-        logging.error(f"Erreur lors de l'extraction des mots-clés : {e}")
-        st.error(f"Erreur : {e}")
+        with st.spinner("Extraction des mots-clés en cours..."):
+            keywords = extract_keywords(text, api_key, model=model)
 
-def do_ask_question_gpt(question: str):
-    full_text = st.session_state.transcribed_text
-    if not full_text:
-        st.warning("Veuillez d'abord faire une transcription.")
-        return
+        set_session_value("keywords_result", keywords)
+        return True
+
+    except Exception as e:
+        handle_error(e, ErrorType.API_ERROR,
+                     "Erreur lors de l'extraction des mots-clés.")
+        return False
+
+
+def run_gpt_question(question: str, api_key: str, model: str = "gpt-3.5-turbo") -> bool:
+    """
+    Pose une question au texte transcrit via GPT.
+
+    Args:
+        question: Question à poser
+        api_key: Clé API OpenAI
+        model: Modèle GPT à utiliser
+
+    Returns:
+        True si succès, False sinon
+    """
+    text = get_session_value("transcribed_text", "")
+    if not text:
+        st.warning("Aucun texte pour poser une question. Veuillez d'abord faire une transcription.")
+        return False
+
     if not question.strip():
         st.warning("Veuillez saisir une question.")
-        return
-    api_key = st.session_state.openai_api_key
-    gpt_model = st.session_state.get("gpt_model_choice", "gpt-3.5-turbo")
+        return False
+
+    if not api_key:
+        st.warning("Clé API OpenAI requise pour cette fonctionnalité.")
+        return False
 
     try:
-        with st.spinner("Envoi de la question à GPT..."):
-            answer = ask_question_about_text(full_text, question, api_key, model=gpt_model)
-        st.session_state.answer_result = answer
-        st.success("Réponse générée.")
-    except Exception as e:
-        logging.error(f"Erreur lors de la question/réponse : {e}")
-        st.error(f"Erreur : {e}")
+        with st.spinner("Traitement de la question en cours..."):
+            answer = ask_question_about_text(text, question, api_key, model=model)
 
-def do_create_chapters():
-    segments = st.session_state.segments
-    chunk_duration = st.session_state.get("chunk_duration", 60)
+        set_session_value("answer_result", answer)
+        return True
+
+    except Exception as e:
+        handle_error(e, ErrorType.API_ERROR,
+                     "Erreur lors du traitement de la question.")
+        return False
+
+
+def create_text_chapters(chunk_duration: float = 60.0) -> bool:
+    """
+    Crée des chapitres à partir des segments de transcription.
+
+    Args:
+        chunk_duration: Durée en secondes pour chaque chapitre
+
+    Returns:
+        True si succès, False sinon
+    """
+    segments = get_session_value("segments", [])
     if not segments:
         st.warning("Aucun segment disponible. Veuillez faire une transcription avant.")
-        return
-    try:
-        with st.spinner("Création des chapitres..."):
-            chapters = create_chapters_from_segments(segments, chunk_duration=chunk_duration)
-        st.session_state.chapters_result = "\n".join(chapters)
-        st.success("Chapitres créés avec succès.")
-    except Exception as e:
-        logging.error(f"Erreur lors de la création de chapitres : {e}")
-        st.error(f"Erreur : {e}")
+        return False
 
-def do_export_text(text_to_export, filename):
-    folder = st.session_state.get("export_folder", "")
-    if not text_to_export.strip():
-        st.warning("Aucun texte à enregistrer.")
-        return
     try:
-        path = export_text_file(text_to_export, folder, filename)
-        st.success(f"Fichier enregistré : {path}")
-        # Proposer le téléchargement direct via un bouton
+        with st.spinner("Création des chapitres en cours..."):
+            chapters = create_chapters_from_segments(segments, chunk_duration=chunk_duration)
+            chapter_text = "\n".join(chapters)
+
+        set_session_value("chapters_result", chapter_text)
+        return True
+
+    except Exception as e:
+        handle_error(e, ErrorType.PROCESSING_ERROR,
+                     "Erreur lors de la création des chapitres.")
+        return False
+
+
+def export_text_to_file(text: str, filename: str) -> bool:
+    """
+    Exporte du texte vers un fichier et propose le téléchargement.
+
+    Args:
+        text: Texte à exporter
+        filename: Nom du fichier
+
+    Returns:
+        True si succès, False sinon
+    """
+    if not text.strip():
+        st.warning("Aucun texte à exporter.")
+        return False
+
+    try:
+        export_folder = get_session_value("export_folder", "")
+        path = export_text_file(text, export_folder, filename)
+
+        # Propose le téléchargement direct
         st.download_button(
             label="Télécharger le fichier",
-            data=text_to_export.encode("utf-8"),
+            data=text.encode("utf-8"),
             file_name=filename,
             mime="text/plain"
         )
+
+        return True
+
     except Exception as e:
-        logging.error(f"Erreur lors de l'export : {e}")
-        st.error(f"Erreur : {e}")
+        handle_error(e, ErrorType.FILE_ERROR,
+                     "Erreur lors de l'export du fichier.")
+        return False
+
 
 def afficher_page_4():
     st.title("Transcription / Traduction")
-    col_left, col_right = st.columns(2)
 
-    with col_left:
-        st.session_state.openai_api_key = st.text_input(
-            "Clé API OpenAI (pour résumé, Q/R, etc.)",
-            type="password",
-            value=st.session_state.openai_api_key
+    # Récupérer la clé API OpenAI
+    openai_api_key = api_key_manager.get_key("openai")
+
+    # Interface principale
+    tabs = st.tabs(["Transcription", "Résumé", "Mots-clés", "Questions/Réponses", "Chapitres"])
+
+    # Tab 1: Transcription
+    with tabs[0]:
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            # Options de transcription
+            st.subheader("Options")
+
+            whisper_model = st.selectbox(
+                "Modèle Whisper",
+                ["tiny", "base", "small", "medium", "large"],
+                help="Plus le modèle est grand, plus la transcription est précise mais lente."
+            )
+
+            translate_checkbox = st.checkbox(
+                "Traduire en anglais (au lieu de transcrire)",
+                value=False,
+                help="Traduit l'audio en anglais quelle que soit la langue d'origine."
+            )
+
+            # Source audio
+            st.subheader("Source audio")
+
+            # Option 1: Fichier depuis session (précédemment téléchargé)
+            audio_data = get_session_value("audio_bytes_for_transcription")
+            if audio_data:
+                st.success("Fichier audio chargé depuis l'extraction précédente.")
+                st.audio(audio_data, format="audio/wav")
+
+            # Option 2: Upload direct
+            audio_file = st.file_uploader(
+                "Ou chargez un fichier audio",
+                type=["wav", "mp3", "m4a", "ogg"],
+                help="Formats supportés: WAV, MP3, M4A, OGG"
+            )
+
+            if audio_file:
+                audio_data = audio_file.read()
+                st.audio(audio_data, format=f"audio/{audio_file.type.split('/')[1]}")
+
+            # Bouton de transcription
+            transcribe_button = st.button(
+                "Lancer la transcription",
+                disabled=audio_data is None and audio_file is None,
+                use_container_width=True
+            )
+
+            if transcribe_button:
+                data_to_transcribe = audio_data if audio_data else audio_file.read()
+                success, message = process_transcription(
+                    data_to_transcribe,
+                    whisper_model,
+                    translate_checkbox
+                )
+
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
+
+        with col2:
+            # Affichage des résultats
+            st.subheader("Texte transcrit")
+
+            transcribed_text = get_session_value("transcribed_text", "")
+            detected_language = get_session_value("detected_language", "")
+
+            if detected_language:
+                st.info(f"Langue détectée: {detected_language}")
+
+            text_area = st.text_area(
+                "Transcription",
+                value=transcribed_text,
+                height=350,
+                key="transcription_textarea"
+            )
+
+            # Si modifié, mettre à jour
+            if text_area != transcribed_text:
+                set_session_value("transcribed_text", text_area)
+
+            # Options d'export
+            if transcribed_text:
+                st.subheader("Exporter")
+                export_folder = st.text_input(
+                    "Dossier d'export (optionnel)",
+                    placeholder="Ex: /home/user/documents"
+                )
+                set_session_value("export_folder", export_folder)
+
+                if st.button("Exporter la transcription (.txt)"):
+                    if export_text_to_file(transcribed_text, "transcription.txt"):
+                        st.success("Transcription exportée avec succès!")
+
+    # Tab 2: Résumé
+    with tabs[1]:
+        st.subheader("Résumé du texte")
+
+        # Options
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            api_key_manager.render_api_key_input("openai", "Clé API OpenAI")
+
+            summary_style = st.selectbox(
+                "Style de résumé",
+                options=["bullet", "concise", "detailed"],
+                format_func=lambda x: {
+                    "bullet": "Liste à puces",
+                    "concise": "Résumé concis",
+                    "detailed": "Résumé détaillé"
+                }[x],
+                help="Choisissez le format du résumé généré."
+            )
+
+        with col2:
+            st.write("")  # Espacement
+            st.write("")  # Espacement
+
+            gpt_model = st.selectbox(
+                "Modèle GPT",
+                ["gpt-3.5-turbo", "gpt-4"],
+                help="GPT-4 est plus précis mais plus coûteux."
+            )
+
+            temperature = st.slider(
+                "Température",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.7,
+                step=0.1,
+                help="Contrôle la créativité du modèle. Valeurs basses = plus factuel."
+            )
+
+        # Bouton de génération
+        if st.button("Générer un résumé", use_container_width=True):
+            if run_gpt_summary(
+                    api_key_manager.get_key("openai"),
+                    style=summary_style,
+                    model=gpt_model,
+                    temperature=temperature
+            ):
+                st.success("Résumé généré avec succès!")
+
+        # Affichage du résultat
+        summary_result = get_session_value("summary_result", "")
+        if summary_result:
+            st.markdown("### Résumé")
+            st.markdown(summary_result)
+
+            # Export
+            if st.button("Exporter le résumé (.txt)"):
+                if export_text_to_file(summary_result, "resume.txt"):
+                    st.success("Résumé exporté avec succès!")
+
+    # Tab 3: Mots-clés
+    with tabs[2]:
+        st.subheader("Extraction de mots-clés")
+
+        # Options
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            api_key_manager.render_api_key_input("openai", "Clé API OpenAI")
+
+        with col2:
+            keywords_model = st.selectbox(
+                "Modèle GPT",
+                ["gpt-3.5-turbo", "gpt-4"],
+                key="keywords_model",
+                help="GPT-4 peut identifier des mots-clés plus précis."
+            )
+
+        # Bouton de génération
+        if st.button("Extraire les mots-clés", use_container_width=True):
+            if run_gpt_keywords(
+                    api_key_manager.get_key("openai"),
+                    model=keywords_model
+            ):
+                st.success("Mots-clés extraits avec succès!")
+
+        # Affichage du résultat
+        keywords_result = get_session_value("keywords_result", "")
+        if keywords_result:
+            st.markdown("### Mots-clés")
+
+            # Formatage pour un affichage plus agréable
+            keywords_list = [kw.strip() for kw in keywords_result.split(",")]
+
+            # Afficher sous forme de puces ou de badges
+            col1, col2, col3 = st.columns([1, 1, 1])
+            for i, keyword in enumerate(keywords_list):
+                if i % 3 == 0:
+                    col1.markdown(f"- {keyword}")
+                elif i % 3 == 1:
+                    col2.markdown(f"- {keyword}")
+                else:
+                    col3.markdown(f"- {keyword}")
+
+            # Export
+            if st.button("Exporter les mots-clés (.txt)"):
+                if export_text_to_file(keywords_result, "mots-cles.txt"):
+                    st.success("Mots-clés exportés avec succès!")
+
+    # Tab 4: Questions/Réponses
+    with tabs[3]:
+        st.subheader("Questions & Réponses")
+
+        # Options
+        api_key_manager.render_api_key_input("openai", "Clé API OpenAI")
+
+        qr_model = st.selectbox(
+            "Modèle GPT",
+            ["gpt-3.5-turbo", "gpt-4"],
+            key="qr_model",
+            help="GPT-4 peut fournir des réponses plus précises pour les questions complexes."
         )
-        whisper_model = st.selectbox(
-            "Modèle Whisper",
-            ["tiny", "base", "small", "medium", "large"]
-        )
-        translate_checkbox = st.checkbox("Traduire (EN) au lieu de transcrire", value=False)
-        audio_path = st.file_uploader("Choisissez un fichier audio", type=["mp3", "wav"])#st.text_input("Chemin du fichier audio", placeholder="Ex: /tmp/ma_video.wav")
 
-        if st.button("Transcrire / Traduire (Whisper)"):
-            do_transcription(audio_path, whisper_model, translate_checkbox)
-
-    with col_right:
-        st.text_area(
-            "Transcription / Traduction",
-            value=st.session_state.transcribed_text,
-            height=300
+        # Zone de question
+        question = st.text_input(
+            "Posez une question sur le contenu transcrit",
+            placeholder="Ex: Quel est le sujet principal abordé?",
+            key="question_input"
         )
 
-    st.markdown("---")
-    st.subheader("Actions GPT")
+        # Bouton d'envoi
+        if st.button("Poser la question", use_container_width=True, disabled=not question.strip()):
+            if run_gpt_question(
+                    question,
+                    api_key_manager.get_key("openai"),
+                    model=qr_model
+            ):
+                st.success("Question traitée avec succès!")
 
-    st.session_state["gpt_model_choice"] = st.selectbox(
-        "Modèle GPT", ["gpt-3.5-turbo", "gpt-4"], index=0
-    )
+        # Affichage du résultat
+        answer_result = get_session_value("answer_result", "")
+        if answer_result:
+            st.markdown("### Réponse")
+            st.markdown(answer_result)
 
-    # Résumé
-    with st.expander("Résumé du texte"):
-        st.session_state["summary_style"] = st.selectbox(
-            "Style de résumé", ["bullet", "concise", "detailed"], index=0
+            # Export
+            if st.button("Exporter la réponse (.txt)"):
+                formatted_answer = f"Q: {question}\n\nR: {answer_result}"
+                if export_text_to_file(formatted_answer, "reponse.txt"):
+                    st.success("Réponse exportée avec succès!")
+
+    # Tab 5: Chapitres
+    with tabs[4]:
+        st.subheader("Chapitres & Segmentation")
+
+        # Options
+        chunk_duration = st.slider(
+            "Durée par chapitre (secondes)",
+            min_value=30,
+            max_value=300,
+            value=60,
+            step=10,
+            help="Définit la durée de chaque chapitre en secondes."
         )
-        st.session_state["summary_temp"] = st.slider("Température GPT", 0.0, 1.0, 0.7)
-        if st.button("Résumer le texte"):
-            do_summarize_text()
-        st.text_area("Résumé", value=st.session_state.summary_result, height=150)
-        if st.button("Télécharger le résumé sous .txt"):
-            do_export_text(st.session_state.summary_result, "summary.txt")
 
-    # Mots-clés
-    with st.expander("Extraction de mots-clés"):
-        if st.button("Extraire les mots-clés"):
-            do_extract_keywords_gpt()
-        st.text_area("Mots-clés", value=st.session_state.keywords_result, height=100)
-        if st.button("Télécharger les mots-clés sous .txt"):
-            do_export_text(st.session_state.keywords_result, "keywords.txt")
+        # Bouton de génération
+        if st.button("Générer les chapitres", use_container_width=True):
+            if create_text_chapters(chunk_duration):
+                st.success("Chapitres générés avec succès!")
 
-    # Q/R
-    with st.expander("Questions / Réponses"):
-        question_input = st.text_input("Votre question sur le texte")
-        if st.button("Poser la question"):
-            do_ask_question_gpt(question_input)
-        st.text_area("Réponse", value=st.session_state.answer_result, height=100)
-        if st.button("Télécharger la réponse sous .txt"):
-            do_export_text(st.session_state.answer_result, "answer.txt")
+        # Affichage du résultat
+        chapters_result = get_session_value("chapters_result", "")
+        if chapters_result:
+            st.markdown("### Liste des chapitres")
+            st.text_area("Chapitres", value=chapters_result, height=300)
 
-    # Chapitres
-    with st.expander("Chapitres (division du texte)"):
-        st.session_state["chunk_duration"] = st.slider("Durée par chapitre (secondes)", 30, 300, 60, 10)
-        if st.button("Créer des chapitres"):
-            do_create_chapters()
-        st.text_area("Chapitres estimés", value=st.session_state.chapters_result, height=150)
-        if st.button("Télécharger les chapitres sous .txt"):
-            do_export_text(st.session_state.chapters_result, "chapters.txt")
-
-    # Export de la transcription
-    with st.expander("Exporter la transcription"):
-        st.session_state["export_folder"] = st.text_input(
-            "Dossier pour sauvegarder le .txt",
-            placeholder="Ex: /home/user/docs"
-        )
-        if st.button("Enregistrer la transcription"):
-            do_export_text(st.session_state.transcribed_text, "transcription.txt")
+            # Export
+            if st.button("Exporter les chapitres (.txt)"):
+                if export_text_to_file(chapters_result, "chapitres.txt"):
+                    st.success("Chapitres exportés avec succès!")
