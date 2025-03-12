@@ -254,8 +254,12 @@ def get_recent_activities(user_id, limit=5):
         logging.error(f"Erreur lors de la récupération des activités récentes: {e}")
         return []
 
+
 def afficher_page_1():
     st.title("🎛️ Dashboard")
+
+    # Détection mobile
+    is_mobile = st.session_state.get("is_mobile", False)
 
     # Vérifier si l'utilisateur est connecté
     if "user_id" not in st.session_state:
@@ -270,35 +274,62 @@ def afficher_page_1():
     # Carte des métriques principales
     st.subheader("📊 Activité des 7 derniers jours")
 
-    col1, col2, col3, col4 = st.columns(4)
+    if is_mobile:
+        # Version mobile: 2 colonnes × 2 rangées
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric(
+                "Transcriptions",
+                value=summary['recent_sum']['transcriptions'],
+                delta=f"{summary['trends']['transcriptions']}%"
+            )
+        with col2:
+            st.metric(
+                "YouTube",
+                value=summary['recent_sum']['youtube_extractions'],
+                delta=f"{summary['trends']['youtube_extractions']}%"
+            )
 
-    with col1:
-        st.metric(
-            "Transcriptions",
-            value=summary['recent_sum']['transcriptions'],
-            delta=f"{summary['trends']['transcriptions']}%"
-        )
-
-    with col2:
-        st.metric(
-            "YouTube",
-            value=summary['recent_sum']['youtube_extractions'],
-            delta=f"{summary['trends']['youtube_extractions']}%"
-        )
-
-    with col3:
-        st.metric(
-            "Vidéos",
-            value=summary['recent_sum']['video_extractions'],
-            delta=f"{summary['trends']['video_extractions']}%"
-        )
-
-    with col4:
-        st.metric(
-            "TTS",
-            value=summary['recent_sum']['tts_generations'],
-            delta=f"{summary['trends']['tts_generations']}%"
-        )
+        col3, col4 = st.columns(2)
+        with col3:
+            st.metric(
+                "Vidéos",
+                value=summary['recent_sum']['video_extractions'],
+                delta=f"{summary['trends']['video_extractions']}%"
+            )
+        with col4:
+            st.metric(
+                "TTS",
+                value=summary['recent_sum']['tts_generations'],
+                delta=f"{summary['trends']['tts_generations']}%"
+            )
+    else:
+        # Version desktop: 4 colonnes
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric(
+                "Transcriptions",
+                value=summary['recent_sum']['transcriptions'],
+                delta=f"{summary['trends']['transcriptions']}%"
+            )
+        with col2:
+            st.metric(
+                "YouTube",
+                value=summary['recent_sum']['youtube_extractions'],
+                delta=f"{summary['trends']['youtube_extractions']}%"
+            )
+        with col3:
+            st.metric(
+                "Vidéos",
+                value=summary['recent_sum']['video_extractions'],
+                delta=f"{summary['trends']['video_extractions']}%"
+            )
+        with col4:
+            st.metric(
+                "TTS",
+                value=summary['recent_sum']['tts_generations'],
+                delta=f"{summary['trends']['tts_generations']}%"
+            )
 
     # Graphique d'activité
     st.subheader("📈 Tendances sur 30 jours")
@@ -308,10 +339,8 @@ def afficher_page_1():
 
     # S'assurer que les dates sont au bon format pour l'affichage
     try:
-        # Essayer d'abord avec pd.to_datetime
         chart_data['date'] = pd.to_datetime(chart_data['date']).dt.strftime('%d/%m')
     except:
-        # Si ça échoue, utiliser une méthode plus robuste
         chart_data['date'] = chart_data['date'].apply(
             lambda x: x.strftime('%d/%m') if hasattr(x, 'strftime') else str(x))
 
@@ -323,12 +352,21 @@ def afficher_page_1():
         'tts_generations': 'Générations TTS'
     }
 
-    chart_metrics = st.multiselect(
-        "Métriques à afficher",
-        options=list(metrics_mapping.keys()),
-        default=['transcriptions'],
-        format_func=lambda x: metrics_mapping[x]
-    )
+    # Simplifier la sélection sur mobile
+    if is_mobile:
+        chart_metrics = st.multiselect(
+            "Afficher",
+            options=list(metrics_mapping.keys()),
+            default=['transcriptions'],
+            format_func=lambda x: metrics_mapping[x]
+        )
+    else:
+        chart_metrics = st.multiselect(
+            "Métriques à afficher",
+            options=list(metrics_mapping.keys()),
+            default=['transcriptions'],
+            format_func=lambda x: metrics_mapping[x]
+        )
 
     # Si aucune métrique sélectionnée, afficher toutes
     if not chart_metrics:
@@ -356,30 +394,56 @@ def afficher_page_1():
     else:
         # Affichage des activités récentes
         activity_df = pd.DataFrame(recent_activities)
+
+        # Sur mobile, limiter les colonnes
+        if is_mobile:
+            if 'details' in activity_df.columns:
+                activity_df = activity_df.drop(columns=['details'])
+            if 'user' in activity_df.columns and 'username' in st.session_state:
+                activity_df = activity_df.drop(columns=['user'])
+
         st.dataframe(activity_df, use_container_width=True)
-   
+
     # Statistiques globales
     st.subheader("🧮 Statistiques globales")
 
-    col1, col2 = st.columns(2)
-
-    with col1:
+    if is_mobile:
+        # Version mobile: empilé
         # Temps total de contenu traité
         total_content_hours = random.randint(8, 20)
         st.info(f"💾 Contenu total traité: **{total_content_hours} heures**")
 
         # Taux de réussite
         success_rate = random.randint(92, 99)
-        st.success(f"✅ Taux de réussite des opérations: **{success_rate}%**")
+        st.success(f"✅ Taux de réussite: **{success_rate}%**")
 
-    with col2:
         # Économies estimées
         saved_time = random.randint(15, 40)
-        st.info(f"⏱️ Temps économisé estimé: **{saved_time} heures**")
+        st.info(f"⏱️ Temps économisé: **{saved_time} heures**")
 
         # Précision moyenne
         accuracy = random.randint(85, 95)
         st.success(f"🎯 Précision moyenne: **{accuracy}%**")
+    else:
+        # Version desktop: colonnes
+        col1, col2 = st.columns(2)
+        with col1:
+            # Temps total de contenu traité
+            total_content_hours = random.randint(8, 20)
+            st.info(f"💾 Contenu total traité: **{total_content_hours} heures**")
+
+            # Taux de réussite
+            success_rate = random.randint(92, 99)
+            st.success(f"✅ Taux de réussite des opérations: **{success_rate}%**")
+
+        with col2:
+            # Économies estimées
+            saved_time = random.randint(15, 40)
+            st.info(f"⏱️ Temps économisé estimé: **{saved_time} heures**")
+
+            # Précision moyenne
+            accuracy = random.randint(85, 95)
+            st.success(f"🎯 Précision moyenne: **{accuracy}%**")
 
     # Aide rapide
     with st.expander("💡 Démarrage rapide"):

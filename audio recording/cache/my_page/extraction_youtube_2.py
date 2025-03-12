@@ -94,31 +94,63 @@ def do_download_youtube(url: str) -> None:
 def afficher_page_2():
     st.title("Extraction depuis YouTube")
 
-    # Interface utilisateur améliorée
-    col1, col2 = st.columns([3, 1])
+    # Détection mobile
+    is_mobile = st.session_state.get("is_mobile", False)
 
-    with col1:
+    if is_mobile:
+        # Version mobile: empilée verticalement
         url_youtube = st.text_input(
             "URL YouTube",
-            placeholder="Collez l'URL YouTube ici (ex: https://www.youtube.com/watch?v=...)"
+            placeholder="Collez l'URL YouTube ici"
         )
 
-    with col2:
-        st.write("")  # Espace pour aligner avec le champ texte
-        st.write("")  # Espace pour aligner avec le champ texte
         download_button = st.button("Télécharger", use_container_width=True)
 
-    # Infobulles explicatives
-    st.markdown("""
-    <small>
-    ℹ️ Formats supportés: Vidéos YouTube standard, shorts, et playlists (1ère vidéo seulement).
-    </small>
-    """, unsafe_allow_html=True)
+        # Infobulles explicatives
+        st.markdown("""
+        <small>
+        ℹ️ Formats supportés: Vidéos YouTube standard, shorts et playlists.
+        </small>
+        """, unsafe_allow_html=True)
+    else:
+        # Interface utilisateur améliorée
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            url_youtube = st.text_input(
+                "URL YouTube",
+                placeholder="Collez l'URL YouTube ici (ex: https://www.youtube.com/watch?v=...)"
+            )
+
+        with col2:
+            st.write("")  # Espace pour aligner avec le champ texte
+            st.write("")  # Espace pour aligner avec le champ texte
+            download_button = st.button("Télécharger", use_container_width=True)
+
+        # Infobulles explicatives
+        st.markdown("""
+        <small>
+        ℹ️ Formats supportés: Vidéos YouTube standard, shorts, et playlists (1ère vidéo seulement).
+        </small>
+        """, unsafe_allow_html=True)
 
     # Téléchargement
     if download_button:
         do_download_youtube(url_youtube)
 
     # Historique des téléchargements récents (exemple)
-    with st.expander("Historique récent"):
-        st.info("Fonctionnalité en développement - L'historique des téléchargements sera disponible prochainement.")
+    if not is_mobile:  # Masquer sur mobile pour économiser de l'espace
+        with st.expander("Historique récent"):
+            st.info("Fonctionnalité en développement - L'historique des téléchargements sera disponible prochainement.")
+
+    # Option pour passer à la transcription
+    if st.button("Passer à la transcription", key="yt_to_transcription_btn"):
+        # Stockage explicite dans session_state
+        st.session_state["audio_bytes_for_transcription"] = audio_bytes
+        st.session_state["selected_page"] = "Transcription"
+
+        # Afficher un message de débogage
+        st.info("Redirection vers la page de transcription...")
+
+        # Forcer la redirection
+        st.experimental_rerun()

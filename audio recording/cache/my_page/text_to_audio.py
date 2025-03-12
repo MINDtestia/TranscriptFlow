@@ -109,26 +109,27 @@ def generate_audio_from_text(
 def afficher_page_5():
     st.title("Génération Audio (Text-to-Speech)")
 
-    # Organisation de l'interface
-    col1, col2 = st.columns([2, 1])
+    # Détection mobile
+    is_mobile = st.session_state.get("is_mobile", False)
 
-    with col1:
+    # Organisation de l'interface adaptative
+    if is_mobile:
+        # Version mobile: empilée
         # Zone de saisie du texte
         default_text = get_session_value("tts_input_text", "")
 
         # Si une transcription est disponible, proposer de l'utiliser
         transcription = get_session_value("transcribed_text", "")
         if transcription and not default_text:
-            if st.button("Utiliser le texte transcrit", type="secondary"):
+            if st.button("Utiliser le texte transcrit", type="secondary", use_container_width=True):
                 default_text = transcription
                 set_session_value("tts_input_text", default_text)
 
         text_input = st.text_area(
             "Texte à convertir en audio",
             value=default_text,
-            height=250,
-            placeholder="Saisissez le texte que vous souhaitez convertir en audio...",
-            help="Maximum ~3000 mots (limite API OpenAI)"
+            height=200,
+            placeholder="Saisissez le texte à convertir en audio...",
         )
 
         # Sauvegarder le texte dans la session
@@ -138,38 +139,101 @@ def afficher_page_5():
         # Calcul de la longueur du texte
         word_count = len(text_input.split()) if text_input else 0
         char_count = len(text_input) if text_input else 0
-
-        # Affichage des statistiques
         st.caption(f"{word_count} mots | {char_count} caractères")
 
-    with col2:
         # Options de configuration
         st.subheader("Configuration")
 
         # Clé API
         api_key_manager.render_api_key_input("openai", "Clé API OpenAI")
 
-        # Modèle TTS
-        model_choice = st.selectbox(
-            "Modèle",
-            options=list(MODEL_OPTIONS.keys()),
-            format_func=lambda x: MODEL_OPTIONS[x],
-            help="tts-1-hd offre une meilleure qualité mais coûte plus cher."
-        )
+        # Configuration simplifiée pour mobile
+        col1, col2 = st.columns(2)
 
-        # Voix
-        voice_choice = st.selectbox(
-            "Voix",
-            options=list(VOICE_OPTIONS.keys()),
-            format_func=lambda x: f"{x} - {VOICE_OPTIONS[x]}",
-            help="Différentes voix ont différentes caractéristiques tonales."
-        )
+        with col1:
+            # Modèle TTS
+            model_choice = st.selectbox(
+                "Modèle",
+                options=list(MODEL_OPTIONS.keys()),
+                format_func=lambda x: "Standard" if x == "tts-1" else "HD"
+            )
+
+        with col2:
+            # Voix simplifiée
+            voice_choice = st.selectbox(
+                "Voix",
+                options=list(VOICE_OPTIONS.keys()),
+                format_func=lambda x: x.capitalize()
+            )
 
         # Estimation du coût
         if text_input:
-            cost_rate = 0.015 if model_choice == "tts-1" else 0.030  # $/1K caractères
+            cost_rate = 0.015 if model_choice == "tts-1" else 0.030
             estimated_cost = (char_count / 1000) * cost_rate
             st.caption(f"Coût estimé: ${estimated_cost:.4f}")
+
+    else:
+        # Version desktop: colonnes
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            # Zone de saisie du texte
+            default_text = get_session_value("tts_input_text", "")
+
+            # Si une transcription est disponible, proposer de l'utiliser
+            transcription = get_session_value("transcribed_text", "")
+            if transcription and not default_text:
+                if st.button("Utiliser le texte transcrit", type="secondary"):
+                    default_text = transcription
+                    set_session_value("tts_input_text", default_text)
+
+            text_input = st.text_area(
+                "Texte à convertir en audio",
+                value=default_text,
+                height=250,
+                placeholder="Saisissez le texte que vous souhaitez convertir en audio...",
+                help="Maximum ~3000 mots (limite API OpenAI)"
+            )
+
+            # Sauvegarder le texte dans la session
+            if text_input != default_text:
+                set_session_value("tts_input_text", text_input)
+
+            # Calcul de la longueur du texte
+            word_count = len(text_input.split()) if text_input else 0
+            char_count = len(text_input) if text_input else 0
+
+            # Affichage des statistiques
+            st.caption(f"{word_count} mots | {char_count} caractères")
+
+        with col2:
+            # Options de configuration
+            st.subheader("Configuration")
+
+            # Clé API
+            api_key_manager.render_api_key_input("openai", "Clé API OpenAI")
+
+            # Modèle TTS
+            model_choice = st.selectbox(
+                "Modèle",
+                options=list(MODEL_OPTIONS.keys()),
+                format_func=lambda x: MODEL_OPTIONS[x],
+                help="tts-1-hd offre une meilleure qualité mais coûte plus cher."
+            )
+
+            # Voix
+            voice_choice = st.selectbox(
+                "Voix",
+                options=list(VOICE_OPTIONS.keys()),
+                format_func=lambda x: f"{x} - {VOICE_OPTIONS[x]}",
+                help="Différentes voix ont différentes caractéristiques tonales."
+            )
+
+            # Estimation du coût
+            if text_input:
+                cost_rate = 0.015 if model_choice == "tts-1" else 0.030  # $/1K caractères
+                estimated_cost = (char_count / 1000) * cost_rate
+                st.caption(f"Coût estimé: ${estimated_cost:.4f}")
 
     # Bouton de génération
     generate_button = st.button(
@@ -207,26 +271,44 @@ def afficher_page_5():
 
             # Options de téléchargement
             filename = f"audio_{voice_choice}_{int(time.time())}.mp3"
-            download_button = st.download_button(
-                label="Télécharger l'audio",
-                data=audio_data,
-                file_name=filename,
-                mime="audio/mp3",
-                use_container_width=True
-            )
 
-            # Si téléchargé, proposition d'effacement
-            if download_button:
-                if st.button("Effacer l'audio généré", key="clear_audio"):
+            if is_mobile:
+                # Version mobile: boutons empilés
+                download_button = st.download_button(
+                    label="Télécharger l'audio",
+                    data=audio_data,
+                    file_name=filename,
+                    mime="audio/mp3",
+                    use_container_width=True
+                )
+
+                # Si téléchargé, proposition d'effacement
+                if download_button and st.button("Effacer l'audio", key="clear_audio", use_container_width=True):
                     set_session_value("tts_audio_data", None)
                     st.rerun()
+            else:
+                # Version desktop: boutons côte à côte
+                download_button = st.download_button(
+                    label="Télécharger l'audio",
+                    data=audio_data,
+                    file_name=filename,
+                    mime="audio/mp3",
+                    use_container_width=True
+                )
 
-            # Détails techniques
-            with st.expander("Détails techniques"):
-                st.markdown(f"""
-                **Fichier généré:**
-                - Format: MP3
-                - Taille: {len(audio_data) / 1024:.1f} KB
-                - Modèle: {model_choice}
-                - Voix: {voice_choice}
-                """)
+                # Si téléchargé, proposition d'effacement
+                if download_button:
+                    if st.button("Effacer l'audio généré", key="clear_audio"):
+                        set_session_value("tts_audio_data", None)
+                        st.rerun()
+
+            # Détails techniques (masqués sur mobile)
+            if not is_mobile:
+                with st.expander("Détails techniques"):
+                    st.markdown(f"""
+                    **Fichier généré:**
+                    - Format: MP3
+                    - Taille: {len(audio_data) / 1024:.1f} KB
+                    - Modèle: {model_choice}
+                    - Voix: {voice_choice}
+                    """)

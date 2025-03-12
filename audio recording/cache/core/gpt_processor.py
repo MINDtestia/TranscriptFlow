@@ -1,7 +1,8 @@
 # core/gpt_processor.py
-
+import logging
 from openai import OpenAI
 from .utils import chunk_text
+
 
 def gpt_request(prompt: str, api_key: str, model: str = "gpt-3.5-turbo", temperature: float = 0.7):
     """
@@ -12,6 +13,12 @@ def gpt_request(prompt: str, api_key: str, model: str = "gpt-3.5-turbo", tempera
 
     try:
         client = OpenAI(api_key=api_key)
+
+        # S'assurer que le texte est correctement encodé pour l'API
+        if isinstance(prompt, str):
+            # S'assurer que le texte est en UTF-8
+            prompt = prompt.encode('utf-8', errors='replace').decode('utf-8')
+
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -21,8 +28,8 @@ def gpt_request(prompt: str, api_key: str, model: str = "gpt-3.5-turbo", tempera
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
+        logging.error(f"Erreur lors de l'appel à GPT: {str(e)}")
         return f"Erreur lors de l'appel à GPT: {str(e)}"
-
 
 def summarize_text(
     text: str,

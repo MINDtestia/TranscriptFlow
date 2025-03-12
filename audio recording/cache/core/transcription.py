@@ -1,8 +1,9 @@
 import ssl
 import whisper
 from .task_queue import transcribe_audio_task
-
-
+import logging
+import subprocess
+import os
 def transcribe_or_translate_locally(
         audio_file_path: str,
         whisper_model: str = "base",
@@ -14,6 +15,36 @@ def transcribe_or_translate_locally(
     Retourne { 'error', 'text', 'segments', 'language' }.
     Gère l'erreur SSL si besoin.
     """
+    """
+        Transcrit (ou traduit) un fichier audio localement avec Whisper.
+        """
+    # Ajouter des logs détaillés pour faciliter le débogage
+    logging.info(f"Début de transcription: fichier={audio_file_path}, modèle={whisper_model}, translate={translate}")
+
+    # Vérifier l'existence du fichier
+    if not os.path.exists(audio_file_path):
+        error_msg = f"Fichier audio introuvable: {audio_file_path}"
+        logging.error(error_msg)
+        return {
+            "error": error_msg,
+            "text": "",
+            "segments": [],
+            "language": "",
+        }
+
+    # Vérifier que ffmpeg est installé
+    try:
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        error_msg = "FFmpeg n'est pas installé ou n'est pas accessible. FFmpeg est requis pour Whisper."
+        logging.error(error_msg)
+        return {
+            "error": error_msg,
+            "text": "",
+            "segments": [],
+            "language": "",
+        }
+
     if not audio_file_path:
         return {
             "error": "Erreur: Aucun fichier audio fourni",
@@ -33,13 +64,14 @@ def transcribe_or_translate_locally(
 
         result = model.transcribe(
             audio_file_path,
-            verbose=False,
+            verbose=True,
             task="translate" if translate else "transcribe",
             word_timestamps=False,
             temperature=0.0,
-            beam_size=5,
-            best_of=5,
-            fp16=True,  # si GPU dispo
+            beam_size=3,  # Réduit de 5 à 3
+            best_of=3,  # Réduit de 5 à 3
+            fp16=False,  # Force fp32 pour CPU
+            condition_on_previous_text=False  # Désactive la conditionnalité qui consomme plus de mémoire
         )
 
         if progress_callback:
@@ -115,3 +147,21 @@ def request_transcription(audio_file_path, user_id, filename, whisper_model="bas
     return task.id
 
 
+# Ajoutez cette fonction dans core/transcription.py
+def optimize_whisper_performance():
+    """Configure Whisper pour de meilleures performances"""
+    import os
+
+    # Forcer l'utilisation du CPU (évite les problèmes avec les GPU anciens/incompatibles)
+    os.environ["WHISPER_FORCE_CPU"] = "1"
+
+    # Limiter les threads pour éviter la surcharge de la RAM
+    os.environ["OMP_NUM_THREADS"] = "2"
+
+    # Désactiver le parallélisme torch si besoin
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+    # Force fp32 sur CPU (les avertissements suggèrent que c'est déjà le cas)
+    os.environ["WHISPER_USE_FP16"] = "0"
+
+# Appelez cette fonction au début de transcribe_or_translate_locally

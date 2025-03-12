@@ -123,6 +123,9 @@ def extract_audio_with_progress(file) -> Optional[bytes]:
 def afficher_page_3():
     st.title("Extraction d'un fichier vidéo")
 
+    # Détection mobile
+    is_mobile = st.session_state.get("is_mobile", False)
+
     # Style personnalisé pour la zone de dépôt
     st.markdown(
         """
@@ -146,9 +149,9 @@ def afficher_page_3():
         unsafe_allow_html=True
     )
 
-    # Interface utilisateur améliorée
+    # Interface utilisateur améliorée - adaptée pour mobile
     uploaded_file = st.file_uploader(
-        "Choisissez un fichier vidéo à extraire",
+        "Choisissez un fichier vidéo à extraire" if not is_mobile else "Charger un fichier vidéo",
         type=["mp4", 'mov', 'avi', 'mkv', 'wmv'],
         key="video_uploader",
         help="Formats supportés: MP4, MOV, AVI, MKV, WMV. Taille maximale: 500 MB."
@@ -159,17 +162,26 @@ def afficher_page_3():
 
     # Afficher des statistiques sur le fichier
     if uploaded_file:
-        col1, col2 = st.columns(2)
-        with col1:
+        if is_mobile:
+            # Version mobile: empilée
             st.info(f"Fichier: {uploaded_file.name}")
-        with col2:
             size_mb = uploaded_file.size / (1024 * 1024)
             st.info(f"Taille: {size_mb:.2f} MB")
+        else:
+            # Version desktop: colonnes
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f"Fichier: {uploaded_file.name}")
+            with col2:
+                size_mb = uploaded_file.size / (1024 * 1024)
+                st.info(f"Taille: {size_mb:.2f} MB")
 
     # Bouton d'extraction
-    extract_button = st.button("Extraire l'audio du fichier vidéo",
-                               disabled=uploaded_file is None,
-                               use_container_width=True)
+    extract_button = st.button(
+        "Extraire l'audio du fichier vidéo",
+        disabled=uploaded_file is None,
+        use_container_width=True
+    )
 
     if extract_button:
         audio_bytes = extract_audio_with_progress(get_session_value("uploaded_mp4"))
@@ -181,15 +193,32 @@ def afficher_page_3():
             st.audio(audio_bytes, format="audio/wav")
 
             # Télécharger l'audio
-            st.download_button(
-                label="Télécharger l'audio extrait",
-                data=audio_bytes,
-                file_name=f"{os.path.splitext(uploaded_file.name)[0]}.wav",
-                mime="audio/wav"
-            )
+            download_col, transcribe_col = st.columns([1, 1]) if not is_mobile else ([1])
 
-            # Option pour passer directement à la transcription
-            if st.button("Passer à la transcription"):
-                set_session_value("audio_bytes_for_transcription", audio_bytes)
-                set_session_value("selected_page", "Transcription")
-                st.rerun()
+            with download_col:
+                st.download_button(
+                    label="Télécharger l'audio extrait",
+                    data=audio_bytes,
+                    file_name=f"{os.path.splitext(uploaded_file.name)[0]}.wav",
+                    mime="audio/wav",
+                    use_container_width=True
+                )
+
+            # Option pour passer directement à la transcription - sur mobile en dessous, sinon à côté
+            if is_mobile:
+                if st.button("Passer à la transcription", use_container_width=True):
+                    set_session_value("audio_bytes_for_transcription", audio_bytes)
+                    set_session_value("selected_page", "Transcription")
+                    st.rerun()
+            else:
+                with transcribe_col:
+                    if st.button("Passer à la transcription", key="to_transcription_btn"):
+                        # Stockage explicite dans session_state
+                        st.session_state["audio_bytes_for_transcription"] = audio_bytes
+                        st.session_state["selected_page"] = "Transcription"
+
+                        # Afficher un message de débogage
+                        st.info("Redirection vers la page de transcription...")
+
+                        # Forcer la redirection
+                        st.experimental_rerun()
