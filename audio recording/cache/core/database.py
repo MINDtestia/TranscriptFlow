@@ -45,8 +45,8 @@ class User(Base):
     # Relations
     api_keys = relationship("APIKey", back_populates="user")
     transcriptions = relationship("Transcription", back_populates="user")
-# Ajouter cette relation à la classe User existante
-    User.activities = relationship("UserActivity", back_populates="user")
+    activities = relationship("UserActivity", back_populates="user")
+    subscriptions = relationship("Subscription", back_populates="user")
 
 # Modèle clé API
 class APIKey(Base):

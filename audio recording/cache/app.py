@@ -3,12 +3,12 @@
 import os
 import logging
 import streamlit as st
-from core.authentication import authenticate, logout
+
 from core.session_manager import initialize_session_state
 from core.database import Base, engine
 from core.auth_manager import login_user, register_user, logout_user
 from core.plan_manager import PlanManager
-
+from my_page.setting.account_settings import afficher_page_compte
 # Définir le chemin de base du projet
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -35,7 +35,6 @@ Base.metadata.create_all(bind=engine)
 # Initialiser toutes les variables de session
 initialize_session_state()
 
-# Vérifier l'authentification
 if not st.session_state.get("authenticated", False):
     # Interface d'authentification avec onglets
     tab1, tab2 = st.tabs(["Connexion", "Inscription"])
@@ -53,7 +52,6 @@ if not st.session_state.get("authenticated", False):
 
 # Si on arrive ici, l'utilisateur est authentifié
 logout_user()  # Afficher le bouton de déconnexion
-
 # Afficher les informations d'utilisation
 if st.session_state.get("user_id"):
     PlanManager.display_user_usage(st.session_state["user_id"])
@@ -78,12 +76,7 @@ from my_page.transcription_4 import afficher_page_4
 from my_page.text_to_audio import afficher_page_5
 
 # Renommé de "Parametre" à "parametres" pour consistance
-try:
-    from my_page.parametres import afficher_page_7
-except ImportError:
-    # Fallback si le renommage n'a pas encore été fait
-    from my_page.Parametre import afficher_page_7
-
+from my_page.parametre import afficher_page_7
 
 # ---------------------
 # Gestion mode clair/sombre + CSS
@@ -152,7 +145,7 @@ with st.sidebar:
         "Text to Audio"
     ]
 
-    menu_bottom = ["API Clés", "Paramètres"]
+    menu_bottom = ["API Clés", "Paramètres","Mon Compte"]
 
     # Boutons du haut
     for item in menu_top:
@@ -196,3 +189,6 @@ elif page == "API Clés":
 
 elif page == "Paramètres":
     afficher_page_7()
+
+elif page == "Mon Compte":
+    afficher_page_compte()

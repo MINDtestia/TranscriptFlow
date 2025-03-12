@@ -135,3 +135,35 @@ def log_user_activity(user_id: int, activity_type: str, details: str = None):
         logging.error(f"Erreur lors de l'enregistrement de l'activité: {e}")
         return False
 
+
+def check_auth_token_validity():
+    """Vérifie si le token JWT est encore valide"""
+    if "token" not in st.session_state:
+        return False
+
+    try:
+        # Importer jwt ici pour éviter une dépendance circulaire
+        import jwt
+        from core.auth_manager import SECRET_KEY, ALGORITHM
+
+        token = st.session_state["token"]
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+
+        # Vérifier si le token n'est pas expiré
+        if "exp" not in payload:
+            return False
+
+        # Le décodage JWT vérifie déjà l'expiration
+        return True
+
+    except jwt.PyJWTError:
+        return False
+
+
+def refresh_session_if_needed():
+    """Rafraîchit la session si nécessaire"""
+    if not check_auth_token_validity():
+        # Déconnecter l'utilisateur si son token est invalide
+        for key in ["token", "user_id", "username", "is_admin", "authenticated"]:
+            if key in st.session_state:
+                del st.session_state[key]

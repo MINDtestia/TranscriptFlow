@@ -65,6 +65,7 @@ def process_transcription_sync(
     Returns:
         (succès, message)
     """
+    start_time = time.time()
     if not audio_data:
         return False, "Aucun fichier audio fourni."
 
@@ -148,6 +149,8 @@ def process_transcription_sync(
         status_text.empty()
 
         from core.session_manager import log_user_activity
+
+        duration_seconds = time.time() - start_time
         log_user_activity(
             st.session_state["user_id"],
             "transcription",

@@ -154,3 +154,64 @@ def logout_user():
                 del st.session_state[key]
         st.success("Vous avez été déconnecté avec succès!")
         st.rerun()
+
+
+def change_password(user_id: int, current_password: str, new_password: str) -> bool:
+    """Change le mot de passe d'un utilisateur"""
+    db = next(get_db())
+    user = db.query(User).filter(User.id == user_id).first()
+
+    if not user:
+        return False
+
+    # Vérifier l'ancien mot de passe
+    if not verify_password(current_password, user.hashed_password):
+        return False
+
+    # Mettre à jour avec le nouveau mot de passe
+    user.hashed_password = get_password_hash(new_password)
+    db.commit()
+    return True
+
+
+def reset_password_request(email: str) -> bool:
+    """Génère un token de réinitialisation pour un utilisateur"""
+    db = next(get_db())
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user:
+        return False
+
+    # Générer un token valide pendant 1 heure
+    token = create_access_token(
+        {"sub": user.username, "type": "reset_password"},
+        expires_minutes=60
+    )
+
+    # Ici, vous ajouteriez la logique pour envoyer un email avec le token
+
+    return True
+
+
+def reset_password_confirm(token: str, new_password: str) -> bool:
+    """Réinitialise le mot de passe avec un token valide"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        token_type = payload.get("type")
+
+        if not username or token_type != "reset_password":
+            return False
+
+        db = next(get_db())
+        user = db.query(User).filter(User.username == username).first()
+
+        if not user:
+            return False
+
+        user.hashed_password = get_password_hash(new_password)
+        db.commit()
+        return True
+
+    except jwt.PyJWTError:
+        return False

@@ -4,10 +4,14 @@ import os
 import tempfile
 import logging
 from datetime import timedelta
+import shutil
+
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "localhost:9000")
 # Ajouter cette variable pour désactiver MinIO si nécessaire
-USE_MINIO = os.getenv("USE_MINIO", "true").lower() == "true"
+DEVELOPMENT_MODE = os.getenv("DEVELOPMENT_MODE", "false").lower() == "true"
+USE_MINIO = os.getenv("USE_MINIO", "true").lower() == "true" and not DEVELOPMENT_MODE
+
 # Configuration MinIO
 #MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
@@ -18,6 +22,8 @@ MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"
 AUDIO_BUCKET = "audio-files"
 TRANSCRIPTION_BUCKET = "transcriptions"
 EXPORT_BUCKET = "exports"
+
+
 
 
 class StorageManager:
@@ -45,6 +51,20 @@ class StorageManager:
             for bucket in [AUDIO_BUCKET, TRANSCRIPTION_BUCKET, EXPORT_BUCKET]:
                 bucket_dir = os.path.join(self.local_storage_dir, bucket)
                 os.makedirs(bucket_dir, exist_ok=True)
+
+    def _ensure_buckets_exist(self):
+        """S'assure que les buckets nécessaires existent"""
+        if not self.use_minio:
+            return
+
+        for bucket in [AUDIO_BUCKET, TRANSCRIPTION_BUCKET, EXPORT_BUCKET]:
+            try:
+                if not self.client.bucket_exists(bucket):
+                    self.client.make_bucket(bucket)
+                    logging.info(f"Bucket {bucket} créé")
+            except Exception as e:
+                logging.error(f"Erreur lors de la création du bucket {bucket}: {e}")
+                raise
 
     def save_audio_file(self, user_id, file_data, filename):
         """
