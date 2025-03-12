@@ -1,0 +1,23 @@
+2025-03-12 11:16:03,048 - urllib3.connectionpool - WARNING - Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NameResolutionError("<urllib3.connection.HTTPConnection object at 0x11dd274c0>: Failed to resolve 'minio' ([Errno 8] nodename nor servname provided, or not known)")': /audio-files?location=
+2025-03-12 11:16:03,454 - urllib3.connectionpool - WARNING - Retrying (Retry(total=3, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NameResolutionError("<urllib3.connection.HTTPConnection object at 0x11dd27670>: Failed to resolve 'minio' ([Errno 8] nodename nor servname provided, or not known)")': /audio-files?location=
+2025-03-12 11:16:04,259 - urllib3.connectionpool - WARNING - Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NameResolutionError("<urllib3.connection.HTTPConnection object at 0x116204580>: Failed to resolve 'minio' ([Errno 8] nodename nor servname provided, or not known)")': /audio-files?location=
+2025-03-12 11:16:05,871 - urllib3.connectionpool - WARNING - Retrying (Retry(total=1, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NameResolutionError("<urllib3.connection.HTTPConnection object at 0x11dcef7c0>: Failed to resolve 'minio' ([Errno 8] nodename nor servname provided, or not known)")': /audio-files?location=
+2025-03-12 11:16:09,082 - urllib3.connectionpool - WARNING - Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NameResolutionError("<urllib3.connection.HTTPConnection object at 0x11d89fd30>: Failed to resolve 'minio' ([Errno 8] nodename nor servname provided, or not known)")': /audio-files?location=
+2025-03-12 11:39:26,256 - root - ERROR - Erreur lors de l'initialisation de MinIO: 'StorageManager' object has no attribute '_ensure_buckets_exist'
+2025-03-12 11:39:26,256 - root - WARNING - Désactivation de MinIO et utilisation du stockage local
+2025-03-12 11:39:28,096 - root - INFO - Clés API chargées depuis l'environnement: openai
+2025-03-12 11:53:02,801 - root - ERROR - Erreur lors de la sauvegarde du fichier audio: name 'shutil' is not defined
+2025-03-12 11:53:17,156 - root - ERROR - Erreur lors de la sauvegarde du fichier audio: name 'shutil' is not defined
+2025-03-12 11:53:55,581 - root - ERROR - Erreur lors de la sauvegarde du fichier audio: name 'shutil' is not defined
+2025-03-12 11:56:41,550 - root - INFO - TTS request: 99 words, model=tts-1, voice=onyx
+2025-03-12 11:56:44,366 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/audio/speech "HTTP/1.1 200 OK"
+2025-03-12 11:59:02,227 - root - INFO - Paramètres sauvegardés: default_language
+2025-03-12 12:17:42,004 - root - ERROR - Erreur lors de l'initialisation de MinIO: 'StorageManager' object has no attribute '_ensure_buckets_exist'
+2025-03-12 12:17:42,005 - root - WARNING - Désactivation de MinIO et utilisation du stockage local
+2025-03-12 12:17:43,074 - root - INFO - Clés API chargées depuis l'environnement: openai
+2025-03-12 12:23:01,162 - root - ERROR - Erreur lors de l'initialisation de MinIO: 'StorageManager' object has no attribute '_ensure_buckets_exist'
+2025-03-12 12:23:01,162 - root - WARNING - Désactivation de MinIO et utilisation du stockage local
+2025-03-12 12:23:01,167 - root - INFO - Clés API chargées depuis l'environnement: openai
+2025-03-12 12:29:00,764 - root - ERROR - Erreur lors de l'initialisation de MinIO: 'StorageManager' object has no attribute '_ensure_buckets_exist'
+2025-03-12 12:29:00,771 - root - WARNING - Désactivation de MinIO et utilisation du stockage local
+2025-03-12 12:29:02,239 - root - INFO - Clés API chargées depuis l'environnement: openai
