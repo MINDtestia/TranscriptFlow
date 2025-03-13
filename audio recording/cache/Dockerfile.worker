@@ -1,0 +1,40 @@
+FROM python:3.10-slim
+
+LABEL maintainer="votre-email@example.com"
+LABEL description="TranscriptFlow - Worker pour tâches asynchrones"
+LABEL version="1.0.0"
+
+# Répertoire de travail
+WORKDIR /app
+
+# Variables d'environnement
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Installer les dépendances système
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    git \
+    postgresql-client \
+    --no-install-recommends && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copier les fichiers de dépendances
+COPY requirements.txt .
+
+# Installer les dépendances Python
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copier l'application
+COPY . .
+
+# Créer un répertoire pour le cache et les données persistantes
+RUN mkdir -p /data/cache /data/uploads
+
+# Volume pour stocker les données persistantes
+VOLUME ["/data"]
+
+# Commande par défaut (sera remplacée dans docker-compose)
+CMD ["celery", "-A", "core.task_queue.celery_app", "worker", "--loglevel=info"]
