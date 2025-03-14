@@ -1,0 +1,14 @@
+streamlit==1.31.0
+python-dotenv==1.0.0
+openai==1.12.0
+whisper==1.1.10
+pytube==15.0.0
+ffmpeg-python==0.2.0
+yt-dlp==2023.10.7
+sqlalchemy==2.0.23
+bcrypt==4.0.1
+pyjwt==2.8.0
+minio==7.2.0
+celery==5.3.6
+redis==5.0.0
+certifi==2023.11.17

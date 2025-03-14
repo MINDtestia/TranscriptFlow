@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  webapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    environment:
+      - DATABASE_URL=postgresql://transcriptflow:${POSTGRES_PASSWORD}@postgres:5432/transcriptflow
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=4000
+      - DEVELOPMENT_MODE=false
+      - USE_MINIO=true
+    volumes:
+      - ./data:/app/data
+      - ./local_storage:/app/local_storage
+    ports:
+      - "8501:8501"
+    networks:
+      - transcriptflow-network
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - postgres
+      - minio
+    environment:
+      - DATABASE_URL=postgresql://transcriptflow:${POSTGRES_PASSWORD}@postgres:5432/transcriptflow
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DEVELOPMENT_MODE=false
+      - USE_MINIO=true
+    volumes:
+      - ./data:/app/data
+      - ./local_storage:/app/local_storage
+    command: celery -A core.task_queue.celery_app worker --loglevel=info
+    networks:
+      - transcriptflow-network
+
+  postgres:
+    image: postgres:14-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=transcriptflow
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=transcriptflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - transcriptflow-network
+
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - transcriptflow-network
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - transcriptflow-network
+
+  # Pour la production avec un domaine:
+  traefik:
+    image: traefik:v2.6
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik:/etc/traefik
+      - traefik_data:/letsencrypt
+    networks:
+      - transcriptflow-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.votre-domain.com`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.middlewares=auth"
+      - "traefik.http.middlewares.auth.basicauth.users=${TRAEFIK_USER}:${TRAEFIK_PASSWORD}"
+
+networks:
+  transcriptflow-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  traefik_data:
