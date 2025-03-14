@@ -2,6 +2,7 @@ import streamlit as st
 import logging
 import tempfile
 import os
+import base64
 from typing import Optional, Dict, Any, List, Tuple
 import time
 import psutil
@@ -10,7 +11,7 @@ from core.transcription import transcribe_or_translate_locally, request_transcri
 from core.gpt_processor import summarize_text, extract_keywords, ask_question_about_text
 from core.utils import create_chapters_from_segments, export_text_file
 from core.error_handling import handle_error, ErrorType, safe_execute
-from core.session_manager import get_session_value, set_session_value
+from core.session_manager import get_session_value, set_session_value, log_user_activity
 from core.api_key_manager import api_key_manager
 from core.storage_manager import storage_manager
 from core.database import Transcription, get_db
@@ -28,6 +29,7 @@ GPT_MODELS = {
     "gpt-4o-mini": {"name": "GPT-4o Mini", "cost": "$0.02-0.10", "speed": "Modéré"},
     "gpt-4": {"name": "GPT-4", "cost": "$0.10-0.50", "speed": "Lent"}
 }
+
 
 # Fonctions de transcription avec cache
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -56,6 +58,23 @@ def check_transcription_status(task_id):
     return task.status, task.result
 
 
+def optimize_memory_for_large_files():
+    """Configure le système pour gérer de gros fichiers"""
+    import gc
+
+    # Forcer le garbage collection
+    gc.collect()
+
+    # Définir une limite basse pour déclencher le GC plus fréquemment
+    gc.set_threshold(10000, 100, 10)
+
+    # Limiter le nombre de threads OpenMP pour Whisper
+    os.environ["OMP_NUM_THREADS"] = "2"
+
+    # Utiliser le CPU pour les gros fichiers
+    os.environ["WHISPER_FORCE_CPU"] = "1"
+
+
 def process_transcription_sync(
         audio_data: bytes,
         whisper_model: str,
@@ -69,6 +88,11 @@ def process_transcription_sync(
     if not audio_data:
         return False, "Aucun fichier audio fourni."
 
+    file_size_mb = len(audio_data) / (1024 * 1024)
+    if file_size_mb > 1000:  # Si plus de 1 GB
+        st.warning(f"Fichier volumineux détecté ({file_size_mb:.1f} MB). Le traitement peut prendre plus de temps.")
+        optimize_memory_for_large_files()
+
     try:
         # Créer la barre de progression
         progress_bar = st.progress(0)
@@ -78,7 +102,10 @@ def process_transcription_sync(
         # Étape 1: Créer un fichier temporaire
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
-            tmp.write(audio_data)
+            # Écrire par blocs pour économiser la mémoire
+            chunk_size = 1024 * 1024  # 1 MB chunks
+            for i in range(0, len(audio_data), chunk_size):
+                tmp.write(audio_data[i:i + chunk_size])
 
         # Vérifier que le fichier existe et a la bonne taille
         if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
@@ -184,13 +211,11 @@ def process_transcription_sync(
             unsafe_allow_html=True
         )
 
-        from core.session_manager import log_user_activity
-
         duration_seconds = time.time() - start_time
         log_user_activity(
             st.session_state["user_id"],
             "transcription",
-            f"Modèle: {whisper_model}, Durée: {duration_seconds :.1f}s"
+            f"Modèle: {whisper_model}, Durée: {duration_seconds:.1f}s"
         )
 
         # Essayer de forcer le rerun de Streamlit
@@ -202,6 +227,97 @@ def process_transcription_sync(
         logging.error(f"Exception dans process_transcription_sync: {str(e)}")
         return False, f"Erreur lors de la transcription: {str(e)}"
 
+
+def process_file_transcription_sync(file_path: str, whisper_model: str, translate: bool = False) -> Tuple[bool, str]:
+    """
+    Version synchrone optimisée pour les fichiers locaux (ne charge pas tout en mémoire)
+    """
+    start_time = time.time()
+
+    if not os.path.exists(file_path):
+        return False, f"Fichier non trouvé: {file_path}"
+
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    if file_size_mb > 1000:  # Si plus de 1 GB
+        st.warning(f"Fichier volumineux détecté ({file_size_mb:.1f} MB). Le traitement peut prendre plus de temps.")
+        optimize_memory_for_large_files()
+
+    try:
+        # Créer la barre de progression
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        status_text.text("Préparation de la transcription...")
+
+        progress_bar.progress(0.1)
+        status_text.text(f"Chargement du modèle Whisper {whisper_model}...")
+
+        # Utiliser directement le chemin du fichier
+        def progress_callback(progress, msg):
+            progress_bar.progress(0.1 + progress * 0.8)
+            status_text.text(msg)
+
+        # Lancer la transcription directement sur le fichier
+        result = transcribe_or_translate_locally(
+            file_path, whisper_model, translate,
+            lambda p, msg: (progress_bar.progress(0.1 + p * 0.8), status_text.text(msg))
+        )
+
+        # Vérifier les erreurs
+        if result.get("error"):
+            progress_bar.progress(1.0)
+            status_text.text(f"Erreur: {result.get('error')}")
+            return False, result.get("error")
+
+        # Sauvegarder la transcription dans un fichier texte
+        transcription_filename = f"transcription_{int(time.time())}.txt"
+        transcription_path = storage_manager.save_transcription(
+            st.session_state["user_id"],
+            result["text"],
+            transcription_filename
+        )
+
+        # Stocker les résultats dans la session
+        st.session_state["transcribed_text"] = result["text"]
+        st.session_state["segments"] = result["segments"]
+        st.session_state["detected_language"] = result.get("language", "")
+        st.session_state["transcription_completed"] = True
+
+        # Enregistrer dans la base de données
+        try:
+            db = next(get_db())
+
+            new_transcription = Transcription(
+                user_id=st.session_state["user_id"],
+                filename=os.path.basename(file_path),
+                duration=time.time() - start_time,
+                model_used=whisper_model,
+                text=result["text"]
+            )
+
+            db.add(new_transcription)
+            db.commit()
+        except Exception as e:
+            logging.error(f"Erreur lors de l'enregistrement en base de données: {str(e)}")
+
+        # Terminer la barre de progression
+        progress_bar.progress(1.0)
+        status_text.text("Transcription terminée!")
+
+        # Enregistrer l'activité
+        duration_seconds = time.time() - start_time
+        log_user_activity(
+            st.session_state["user_id"],
+            "transcription",
+            f"Fichier: {os.path.basename(file_path)}, Modèle: {whisper_model}, Durée: {duration_seconds:.1f}s"
+        )
+
+        # Forcer le rafraîchissement
+        st.rerun()
+        return True, "Transcription terminée avec succès!"
+
+    except Exception as e:
+        logging.error(f"Exception dans process_file_transcription_sync: {str(e)}")
+        return False, f"Erreur lors de la transcription: {str(e)}"
 
 
 def process_transcription_async(audio_data, whisper_model, translate=False):
@@ -265,8 +381,53 @@ def process_transcription_async(audio_data, whisper_model, translate=False):
         return False, f"Erreur lors du traitement de la transcription: {str(e)}"
 
 
-# [Les fonctions pour les analyses GPT restent inchangées]
-def run_gpt_summary(api_key, style: str = "bullet", model="gpt-3.5-turbo", temperature=0.7):
+def process_file_transcription_async(file_path: str, whisper_model: str, translate: bool = False) -> Tuple[bool, str]:
+    """
+    Version asynchrone pour les fichiers déjà sur le serveur
+    """
+    if not os.path.exists(file_path):
+        return False, f"Fichier non trouvé: {file_path}"
+
+    try:
+        # Calculer la taille du fichier
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        logging.info(f"Traitement asynchrone du fichier: {file_path} ({file_size_mb:.2f} MB)")
+
+        # Utiliser le chemin du fichier directement sans le charger en mémoire
+        # (Cette partie dépend de l'implémentation de request_transcription)
+        # Pour cette version simplifiée, on va simuler un task ID
+
+        task_id = f"local_{int(time.time())}_{os.path.basename(file_path)}"
+        st.session_state["transcription_task_id"] = task_id
+        st.session_state["local_file_path"] = file_path
+        st.session_state["local_task_params"] = {
+            "model": whisper_model,
+            "translate": translate,
+            "start_time": time.time()
+        }
+
+        return True, f"Transcription du fichier {os.path.basename(file_path)} lancée en arrière-plan."
+
+    except Exception as e:
+        logging.error(f"Exception dans process_file_transcription_async: {str(e)}")
+        return False, f"Erreur lors du traitement asynchrone: {str(e)}"
+
+
+def estimate_processing_time(file_size_mb, model):
+    """Estime le temps de traitement en minutes"""
+    if model == "tiny":
+        return max(1, int(file_size_mb * 0.05 / 60))  # ~50s par GB
+    elif model == "base":
+        return max(1, int(file_size_mb * 0.1 / 60))  # ~100s par GB
+    elif model == "small":
+        return max(2, int(file_size_mb * 0.2 / 60))  # ~200s par GB
+    elif model == "medium":
+        return max(5, int(file_size_mb * 0.5 / 60))  # ~500s par GB
+    else:  # large
+        return max(10, int(file_size_mb * 1.0 / 60))  # ~1000s par GB
+
+
+def run_gpt_summary(api_key, style="bullet", model="gpt-3.5-turbo", temperature=0.7):
     """Génère un résumé du texte transcrit"""
     text = get_session_value("transcribed_text", "")
 
@@ -303,6 +464,7 @@ def run_gpt_summary(api_key, style: str = "bullet", model="gpt-3.5-turbo", tempe
         logging.error(f"Exception dans run_gpt_summary: {str(e)}")
         return False
 
+
 def optimize_whisper_for_limited_ram(model_name="base"):
     """Configure Whisper pour fonctionner avec une RAM limitée"""
     # Limiter l'utilisation de la mémoire pour les modèles whisper
@@ -319,6 +481,7 @@ def optimize_whisper_for_limited_ram(model_name="base"):
         recommended_model = "small"
 
     return recommended_model
+
 
 def run_gpt_keywords(api_key: str, model: str = "gpt-3.5-turbo") -> bool:
     """
@@ -377,10 +540,6 @@ def run_gpt_question(question: str, api_key: str, model: str = "gpt-3.5-turbo") 
 
     if not question.strip():
         st.warning("Veuillez saisir une question.")
-        return False
-
-    if not api_key:
-        st.warning("Clé API OpenAI requise pour cette fonctionnalité.")
         return False
 
     try:
@@ -459,6 +618,7 @@ def export_text_to_file(text: str, filename: str) -> bool:
                      "Erreur lors de l'export du fichier.")
         return False
 
+
 def model_format_func(model_id):
     """Formate l'affichage des modèles dans le selectbox"""
     model_info = GPT_MODELS.get(model_id, {})
@@ -470,15 +630,6 @@ def afficher_page_4():
 
     # Détection mobile
     is_mobile = st.session_state.get("is_mobile", False)
-
-    # Vérifier si l'audio a été passé depuis l'extraction YouTube
-    audio_data = get_session_value("audio_bytes_for_transcription")
-    if audio_data:
-        logging.info(f"Audio trouvé dans la session: {len(audio_data)} bytes")
-        st.success("Audio chargé depuis l'extraction précédente!")
-        st.audio(audio_data, format="audio/wav")
-    else:
-        logging.warning("Aucun audio trouvé dans la session")
 
     # Importer les vérifications des quotas du plan
     from core.plan_manager import PlanManager
@@ -534,6 +685,200 @@ def afficher_page_4():
                 type=["wav", "mp3", "m4a", "ogg"]
             )
 
+            # Après les options existantes (audio_file), ajoutez:
+            st.divider()
+            st.markdown("### Alternative pour fichiers volumineux (+200MB)")
+
+            server_audio_path = st.text_input(
+                "Chemin du fichier audio sur le serveur:",
+                placeholder="/chemin/vers/votre/fichier.wav",
+                help="Si le fichier est déjà présent sur le serveur, entrez son chemin absolu ici."
+            )
+
+            # Vérification et prévisualisation du fichier spécifié
+            if server_audio_path:
+                if os.path.exists(server_audio_path):
+                    file_size_mb = os.path.getsize(server_audio_path) / (1024 * 1024)
+                    st.success(f"✅ Fichier trouvé: {os.path.basename(server_audio_path)} ({file_size_mb:.2f} MB)")
+
+                    # Prévisualisation audio si possible
+                    try:
+                        # Créer un aperçu du fichier audio (premiers 10MB)
+                        with open(server_audio_path, "rb") as f:
+                            preview_bytes = f.read(10 * 1024 * 1024)  # 10MB max pour prévisualisation
+
+                        st.audio(preview_bytes, format=f"audio/{os.path.splitext(server_audio_path)[1][1:]}")
+                    except:
+                        st.info("Aperçu audio non disponible")
+
+                    # Définir la source
+                    if st.button("Utiliser ce fichier pour la transcription", key="use_server_file"):
+                        # Stocker le chemin du fichier au lieu du contenu pour économiser la mémoire
+                        set_session_value("server_audio_path_for_transcription", server_audio_path)
+                        st.success(
+                            f"Le fichier {os.path.basename(server_audio_path)} sera utilisé pour la transcription.")
+                else:
+                    st.error(f"❌ Fichier non trouvé: {server_audio_path}")
+                    st.info(
+                        "Assurez-vous que le chemin est correct et que le fichier est accessible par l'application.")
+
+            # Ajout de l'enregistrement audio
+            st.divider()
+            st.markdown("### Enregistrement direct via microphone")
+
+            # Création d'un composant HTML personnalisé avec JavaScript pour l'enregistrement
+            mic_recorder_code = """
+            <div style="display: flex; flex-direction: column; align-items: center; gap: 10px;">
+                <div id="recording-status" style="font-weight: bold; color: #888;">Prêt à enregistrer</div>
+                <div style="display: flex; gap: 10px;">
+                    <button id="start-btn" style="background-color: #ff4b4b; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">
+                        🎤 Démarrer l'enregistrement
+                    </button>
+                    <button id="stop-btn" style="background-color: #4b4bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; display: none;">
+                        ⏹️ Arrêter
+                    </button>
+                </div>
+                <div id="timer" style="font-size: 1.5em; margin-top: 10px;">00:00</div>
+                <audio id="audio-player" controls style="width: 100%; margin-top: 15px; display: none;"></audio>
+                <input type="hidden" id="audio-data">
+                <button id="use-recording-btn" style="background-color: #4CAF50; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin-top: 10px; display: none;">
+                    Utiliser cet enregistrement
+                </button>
+            </div>
+
+            <script>
+                // Variables pour l'enregistrement
+                let mediaRecorder;
+                let audioChunks = [];
+                let startTime;
+                let timerInterval;
+                let audioBlob;
+                let audioUrl;
+
+                // Éléments du DOM
+                const startBtn = document.getElementById('start-btn');
+                const stopBtn = document.getElementById('stop-btn');
+                const statusDiv = document.getElementById('recording-status');
+                const timerDiv = document.getElementById('timer');
+                const audioPlayer = document.getElementById('audio-player');
+                const audioDataInput = document.getElementById('audio-data');
+                const useRecordingBtn = document.getElementById('use-recording-btn');
+
+                // Mise à jour du timer
+                function updateTimer() {
+                    const elapsedTime = new Date(Date.now() - startTime);
+                    const minutes = elapsedTime.getUTCMinutes().toString().padStart(2, '0');
+                    const seconds = elapsedTime.getUTCSeconds().toString().padStart(2, '0');
+                    timerDiv.textContent = `${minutes}:${seconds}`;
+                }
+
+                // Démarrer l'enregistrement
+                startBtn.addEventListener('click', async () => {
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        mediaRecorder = new MediaRecorder(stream);
+                        audioChunks = [];
+
+                        mediaRecorder.addEventListener('dataavailable', event => {
+                            audioChunks.push(event.data);
+                        });
+
+                        mediaRecorder.addEventListener('stop', () => {
+                            // Créer le blob audio
+                            audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                            audioUrl = URL.createObjectURL(audioBlob);
+                            audioPlayer.src = audioUrl;
+                            audioPlayer.style.display = 'block';
+
+                            // Convertir en base64 pour Streamlit
+                            const reader = new FileReader();
+                            reader.readAsDataURL(audioBlob);
+                            reader.onloadend = () => {
+                                const base64data = reader.result.split(',')[1];
+                                audioDataInput.value = base64data;
+
+                                // Afficher le bouton pour utiliser l'enregistrement
+                                useRecordingBtn.style.display = 'block';
+                            };
+
+                            // Réinitialiser l'interface
+                            startBtn.style.display = 'block';
+                            stopBtn.style.display = 'none';
+                            statusDiv.textContent = 'Enregistrement terminé';
+                            statusDiv.style.color = '#4CAF50';
+
+                            // Arrêter le timer
+                            clearInterval(timerInterval);
+                        });
+
+                        // Démarrer l'enregistrement
+                        mediaRecorder.start();
+                        startTime = Date.now();
+                        timerInterval = setInterval(updateTimer, 1000);
+
+                        // Mettre à jour l'interface
+                        startBtn.style.display = 'none';
+                        stopBtn.style.display = 'block';
+                        statusDiv.textContent = 'Enregistrement en cours...';
+                        statusDiv.style.color = '#ff4b4b';
+                        timerDiv.textContent = '00:00';
+                        audioPlayer.style.display = 'none';
+                        useRecordingBtn.style.display = 'none';
+
+                    } catch (error) {
+                        console.error('Erreur lors de l\\'accès au microphone:', error);
+                        statusDiv.textContent = 'Erreur: impossible d\\'accéder au microphone';
+                        statusDiv.style.color = 'red';
+                    }
+                });
+
+                // Arrêter l'enregistrement
+                stopBtn.addEventListener('click', () => {
+                    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                        mediaRecorder.stop();
+                        mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                    }
+                });
+
+                // Utiliser l'enregistrement pour la transcription
+                useRecordingBtn.addEventListener('click', () => {
+                    // Envoi des données à Streamlit via un événement personnalisé
+                    const event = new CustomEvent('recordingComplete', { 
+                        detail: { audioData: audioDataInput.value }
+                    });
+                    window.dispatchEvent(event);
+
+                    // Pour communiquer avec Streamlit, stocker la valeur dans sessionStorage
+                    sessionStorage.setItem('recordedAudioData', audioDataInput.value);
+
+                    statusDiv.textContent = 'Enregistrement envoyé pour transcription';
+                    statusDiv.style.color = '#4b4bff';
+
+                    // Forcer un rechargement pour que Streamlit puisse récupérer les données
+                    window.location.reload();
+                });
+            </script>
+            """
+
+            # Afficher le composant HTML personnalisé
+            mic_component = st.components.v1.html(mic_recorder_code, height=300)
+
+            # Vérifier si des données audio ont été enregistrées en session storage
+            if 'recordedAudioData' in st.session_state:
+                audio_base64 = st.session_state['recordedAudioData']
+
+                # Convertir de base64 à bytes
+                audio_bytes = base64.b64decode(audio_base64)
+
+                st.success("Enregistrement audio capturé avec succès!")
+                st.audio(audio_bytes, format="audio/wav")
+
+                # Bouton pour utiliser l'enregistrement
+                if st.button("Utiliser cet enregistrement pour la transcription", key="use_recorded_audio"):
+                    set_session_value("audio_bytes_for_transcription", audio_bytes)
+                    st.session_state.pop('recordedAudioData', None)  # Nettoyer après utilisation
+                    st.rerun()
+
             if audio_file:
                 file_size_mb = audio_file.size / (1024 * 1024)
                 if "user_id" in st.session_state:
@@ -546,7 +891,8 @@ def afficher_page_4():
             # Bouton de transcription
             transcribe_button = st.button(
                 "Lancer la transcription",
-                disabled=audio_data is None and audio_file is None,
+                disabled=(audio_data is None and audio_file is None and not get_session_value(
+                    "server_audio_path_for_transcription", "")),
                 use_container_width=True
             )
 
@@ -601,13 +947,7 @@ def afficher_page_4():
                     value=False,
                     help="Traduit l'audio en anglais quelle que soit la langue d'origine."
                 )
-                """
-                use_async = st.checkbox(
-                    "Utiliser le traitement asynchrone",
-                    value=True,
-                    help="Recommandé pour les fichiers longs. La transcription s'exécutera en arrière-plan."
-                )
-                """
+
                 st.warning("Transcription asynchrone désactivée en mode développement (Redis non disponible)")
                 use_async = st.checkbox(
                     "Utiliser le traitement asynchrone (désactivé)",
@@ -645,13 +985,250 @@ def afficher_page_4():
                     st.audio(audio_data, format=f"audio/{audio_file.type.split('/')[1]}")
                     st.info(f"Taille du fichier: {file_size_mb:.1f} MB")
 
-                # Bouton de transcription
-                transcribe_button = st.button(
-                    "Lancer la transcription",
-                    disabled=audio_data is None and audio_file is None,
-                    use_container_width=True
+                # Option 3: Fichier sur le serveur (alternative pour les gros fichiers)
+                st.subheader("Alternative pour fichiers volumineux (+200MB)")
+                server_audio_path = st.text_input(
+                    "Chemin du fichier audio sur le serveur:",
+                    placeholder="/chemin/vers/votre/fichier.wav",
+                    help="Si le fichier est déjà présent sur le serveur, entrez son chemin absolu ici."
                 )
 
+                # Vérification du fichier serveur
+                if server_audio_path:
+                    if os.path.exists(server_audio_path):
+                        file_size_mb = os.path.getsize(server_audio_path) / (1024 * 1024)
+                        st.success(f"✅ Fichier trouvé: {os.path.basename(server_audio_path)} ({file_size_mb:.2f} MB)")
+
+                        # Prévisualisation audio si possible
+                        try:
+                            # Créer un aperçu du fichier audio (premiers 10MB)
+                            with open(server_audio_path, "rb") as f:
+                                preview_bytes = f.read(min(10 * 1024 * 1024, os.path.getsize(server_audio_path)))
+
+                            st.audio(preview_bytes, format=f"audio/{os.path.splitext(server_audio_path)[1][1:]}")
+                        except:
+                            st.info("Aperçu audio non disponible")
+
+                        # Définir la source
+                        if st.button("Utiliser ce fichier pour la transcription", key="use_server_file"):
+                            set_session_value("server_audio_path_for_transcription", server_audio_path)
+                            st.success(
+                                f"Le fichier {os.path.basename(server_audio_path)} sera utilisé pour la transcription.")
+                    else:
+                        st.error(f"❌ Fichier non trouvé: {server_audio_path}")
+                        st.info(
+                            "Assurez-vous que le chemin est correct et que le fichier est accessible par l'application.")
+
+                # Option 4: Enregistrement microphone
+                st.subheader("Enregistrement direct via microphone")
+
+                # Création d'un composant HTML personnalisé pour l'enregistrement audio
+                mic_recorder_code = """
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 10px;">
+                    <div id="recording-status" style="font-weight: bold; color: #888;">Prêt à enregistrer</div>
+                    <div style="display: flex; gap: 10px;">
+                        <button id="start-btn" style="background-color: #ff4b4b; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">
+                            🎤 Démarrer l'enregistrement
+                        </button>
+                        <button id="stop-btn" style="background-color: #4b4bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; display: none;">
+                            ⏹️ Arrêter
+                        </button>
+                    </div>
+                    <div id="timer" style="font-size: 1.5em; margin-top: 10px;">00:00</div>
+                    <audio id="audio-player" controls style="width: 100%; margin-top: 15px; display: none;"></audio>
+                    <input type="hidden" id="audio-data">
+                    <button id="use-recording-btn" style="background-color: #4CAF50; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin-top: 10px; display: none;">
+                        Utiliser cet enregistrement
+                    </button>
+                </div>
+
+                <script>
+                    // Variables pour l'enregistrement
+                    let mediaRecorder;
+                    let audioChunks = [];
+                    let startTime;
+                    let timerInterval;
+                    let audioBlob;
+                    let audioUrl;
+
+                    // Éléments du DOM
+                    const startBtn = document.getElementById('start-btn');
+                    const stopBtn = document.getElementById('stop-btn');
+                    const statusDiv = document.getElementById('recording-status');
+                    const timerDiv = document.getElementById('timer');
+                    const audioPlayer = document.getElementById('audio-player');
+                    const audioDataInput = document.getElementById('audio-data');
+                    const useRecordingBtn = document.getElementById('use-recording-btn');
+
+                    // Mise à jour du timer
+                    function updateTimer() {
+                        const elapsedTime = new Date(Date.now() - startTime);
+                        const minutes = elapsedTime.getUTCMinutes().toString().padStart(2, '0');
+                        const seconds = elapsedTime.getUTCSeconds().toString().padStart(2, '0');
+                        timerDiv.textContent = `${minutes}:${seconds}`;
+                    }
+
+                    // Démarrer l'enregistrement
+                    startBtn.addEventListener('click', async () => {
+                        try {
+                            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                            mediaRecorder = new MediaRecorder(stream);
+                            audioChunks = [];
+
+                            mediaRecorder.addEventListener('dataavailable', event => {
+                                audioChunks.push(event.data);
+                            });
+
+                            mediaRecorder.addEventListener('stop', () => {
+                                // Créer le blob audio
+                                audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                                audioUrl = URL.createObjectURL(audioBlob);
+                                audioPlayer.src = audioUrl;
+                                audioPlayer.style.display = 'block';
+
+                                // Convertir en base64 pour Streamlit
+                                const reader = new FileReader();
+                                reader.readAsDataURL(audioBlob);
+                                reader.onloadend = () => {
+                                    const base64data = reader.result.split(',')[1];
+                                    audioDataInput.value = base64data;
+
+                                    // Afficher le bouton pour utiliser l'enregistrement
+                                    useRecordingBtn.style.display = 'block';
+                                };
+
+                                // Réinitialiser l'interface
+                                startBtn.style.display = 'block';
+                                stopBtn.style.display = 'none';
+                                statusDiv.textContent = 'Enregistrement terminé';
+                                statusDiv.style.color = '#4CAF50';
+
+                                // Arrêter le timer
+                                clearInterval(timerInterval);
+                            });
+
+                            // Démarrer l'enregistrement
+                            mediaRecorder.start();
+                            startTime = Date.now();
+                            timerInterval = setInterval(updateTimer, 1000);
+
+                            // Mettre à jour l'interface
+                            startBtn.style.display = 'none';
+                            stopBtn.style.display = 'block';
+                            statusDiv.textContent = 'Enregistrement en cours...';
+                            statusDiv.style.color = '#ff4b4b';
+                            timerDiv.textContent = '00:00';
+                            audioPlayer.style.display = 'none';
+                            useRecordingBtn.style.display = 'none';
+
+                        } catch (error) {
+                            console.error('Erreur lors de l\\'accès au microphone:', error);
+                            statusDiv.textContent = 'Erreur: impossible d\\'accéder au microphone';
+                            statusDiv.style.color = 'red';
+                        }
+                    });
+
+                    // Arrêter l'enregistrement
+                    stopBtn.addEventListener('click', () => {
+                        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                            mediaRecorder.stop();
+                            mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                        }
+                    });
+
+                    // Utiliser l'enregistrement pour la transcription
+                    useRecordingBtn.addEventListener('click', () => {
+                    // Pour communiquer avec Streamlit, stocker la valeur dans sessionStorage
+                    sessionStorage.setItem('recordedAudioData', audioDataInput.value);
+                    
+                    statusDiv.textContent = 'Démarrage de la transcription...';
+                    statusDiv.style.color = '#4b4bff';
+                    
+                    // Ajouter un paramètre pour indiquer qu'il faut lancer la transcription
+                    sessionStorage.setItem('startTranscription', 'true');
+                    
+                    // Forcer un rechargement pour que Streamlit puisse accéder aux données
+                    window.location.reload();
+                });
+                </script>
+                """
+
+                # Afficher le composant HTML personnalisé
+                mic_component = st.components.v1.html(mic_recorder_code, height=250)
+
+                # JavaScript pour récupérer les données de la session storage
+                st.markdown("""
+                <script>
+                // Vérifier si des données audio sont disponibles dans sessionStorage
+                document.addEventListener('DOMContentLoaded', function() {
+                    const audioData = sessionStorage.getItem('recordedAudioData');
+                    if (audioData) {
+                        // L'envoyer à Python via la session state
+                        if (!window.parent.streamlitReady) {
+                            window.addEventListener('streamlit:componentReady', function() {
+                                window.parent.sessionStorage.setItem('streamlit:recordedAudioData', audioData);
+                                window.parent.Streamlit.setComponentValue(audioData);
+                            });
+                        } else {
+                            window.parent.sessionStorage.setItem('streamlit:recordedAudioData', audioData);
+                            window.parent.Streamlit.setComponentValue(audioData);
+                        }
+                        
+                        // Nettoyer le storage pour éviter la réutilisation
+                        sessionStorage.removeItem('recordedAudioData');
+                    }
+                });
+                </script>
+                """, unsafe_allow_html=True)
+                # Vérifier si des données audio ont été enregistrées
+                # Dans la partie où vous traitez l'audio enregistré
+                audio_from_mic = False
+                if 'recordedAudioData' in st.session_state:
+                    audio_base64 = st.session_state['recordedAudioData']
+
+                    # Convertir de base64 à bytes
+                    audio_bytes = base64.b64decode(audio_base64)
+
+                    st.success("Enregistrement audio capturé avec succès! Lancement de la transcription...")
+                    st.audio(audio_bytes, format="audio/wav")
+
+                    # Stocker l'audio pour la transcription
+                    set_session_value("audio_bytes_for_transcription", audio_bytes)
+                    audio_data = audio_bytes  # Mettre à jour audio_data pour qu'il soit disponible
+                    audio_from_mic = True
+                    # Nettoyer pour éviter de répéter l'opération
+                    st.session_state.pop('recordedAudioData', None)
+                    # Vérifier les quotas
+                    if "user_id" in st.session_state:
+                        if not PlanManager.check_transcription_quota(st.session_state["user_id"]):
+                            st.error("Vous avez atteint votre quota de transcription pour ce mois.")
+                        else:
+                            # Lancer directement la transcription
+                            file_size_mb = len(audio_bytes) / (1024 * 1024)
+
+                            # Choix du modèle de transcription (utiliser celui sélectionné dans l'interface)
+                            selected_model = whisper_model
+                            translate = translate_checkbox
+
+                            # Démarrer la transcription synchrone
+                            with st.spinner("Transcription de l'enregistrement en cours..."):
+                                success, message = process_transcription_sync(
+                                    audio_bytes,
+                                    selected_model,
+                                    translate
+                                )
+
+                                if success:
+                                    st.success(message)
+                                    # Nettoyer après usage
+                                    st.session_state.pop('recordedAudioData', None)
+                                else:
+                                    st.error(message)
+                    else:
+                        st.error("Erreur de session. Veuillez vous reconnecter.")
+
+                    # Supprimer les données pour éviter de répéter l'opération au prochain chargement
+                    st.session_state.pop('recordedAudioData', None)
             with col2:
                 # Affichage des résultats
                 st.subheader("Texte transcrit")
@@ -685,51 +1262,121 @@ def afficher_page_4():
                     if st.button("Exporter la transcription (.txt)"):
                         if export_text_to_file(transcribed_text, "transcription.txt"):
                             st.success("Transcription exportée avec succès!")
-
+        # Définir le bouton de transcription (sans changer)
+        transcribe_button = st.button(
+            "Lancer la transcription",
+            disabled=(audio_data is None and audio_file is None and not get_session_value(
+                "server_audio_path_for_transcription", "")),
+            use_container_width=True
+        )
+        # Ajouter cette condition après la définition du bouton
+        # Transcription automatique si l'audio vient du microphone
+        if audio_from_mic and audio_data:
+            transcribe_mic_button = st.button(
+                "Transcrire l'enregistrement audio",
+                key="transcribe_mic_button",
+                use_container_width=True
+            )
+            if transcribe_mic_button:
+                transcribe_button = True  # Activer le processus de transcription
         # Traitement du bouton de transcription (identique pour les deux layouts)
-        if transcribe_button:
+        if 'transcribe_button' in locals() and transcribe_button:
             # Vérifier les quotas
             if "user_id" in st.session_state:
                 if not PlanManager.check_transcription_quota(st.session_state["user_id"]):
                     st.error("Vous avez atteint votre quota de transcription pour ce mois.")
                 else:
-                    # Récupérer l'audio à transcrire, en priorité à partir de audio_data
-                    data_to_transcribe = None
+                    # Vérifier d'abord si on a un chemin de fichier serveur
+                    server_path = get_session_value("server_audio_path_for_transcription", "")
+                    if server_path and os.path.exists(server_path):
+                        # Pour les gros fichiers, on passe directement le chemin sans charger tout en mémoire
+                        logging.info(f"Utilisation du fichier audio depuis le chemin: {server_path}")
 
-                    # D'abord vérifier si on a de l'audio en session
-                    if audio_data:
-                        data_to_transcribe = audio_data
-                        logging.info(f"Utilisation de l'audio depuis la session: {len(data_to_transcribe)} bytes")
-                    # Sinon, utiliser le fichier uploadé s'il existe
-                    elif audio_file:
-                        data_to_transcribe = audio_file.read()
-                        logging.info(
-                            f"Utilisation de l'audio depuis le fichier uploadé: {len(data_to_transcribe)} bytes")
+                        # Force le traitement asynchrone pour les fichiers > 1GB
+                        file_size_mb = os.path.getsize(server_path) / (1024 * 1024)
+                        force_async = file_size_mb > 1000
 
-                    if data_to_transcribe:
-                        # Continuer avec le traitement comme avant...
+                        if force_async and not use_async:
+                            st.info(
+                                f"Traitement asynchrone automatiquement activé pour ce fichier volumineux ({file_size_mb:.1f} MB)")
+                            use_async = True
+
+                        # Estimation du temps de traitement
+                        if file_size_mb > 500:
+                            est_minutes = estimate_processing_time(file_size_mb, whisper_model)
+                            st.info(
+                                f"Temps de traitement estimé: environ {est_minutes} minutes. Vous pouvez quitter cette page et revenir plus tard.")
+
                         if use_async:
-                            success, message = process_transcription_async(
-                                data_to_transcribe,
-                                whisper_model,
-                                translate_checkbox
+                            success, message = process_file_transcription_async(
+                                server_path, whisper_model, translate_checkbox
                             )
                         else:
-                            success, message = process_transcription_sync(
-                                data_to_transcribe,
-                                whisper_model,
-                                translate_checkbox
+                            success, message = process_file_transcription_sync(
+                                server_path, whisper_model, translate_checkbox
                             )
 
                         if success:
                             st.success(message)
-                            # Si transcription réussie, effacer l'audio temporaire de la session
-                            set_session_value("audio_bytes_for_transcription", None)
+                            # Si transcription réussie, effacer le chemin temporaire de la session
+                            set_session_value("server_audio_path_for_transcription", None)
                         else:
                             st.error(message)
+
+                    # Sinon, on utilise les anciennes méthodes
                     else:
-                        st.error(
-                            "Aucun audio à transcrire. Veuillez charger un fichier audio ou extraire depuis YouTube.")
+                        # Récupérer l'audio à transcrire, en priorité à partir de audio_data
+                        data_to_transcribe = None
+
+                        # D'abord vérifier si on a de l'audio en session
+                        if audio_data:
+                            data_to_transcribe = audio_data
+                            logging.info(f"Utilisation de l'audio depuis la session: {len(data_to_transcribe)} bytes")
+                        # Sinon, utiliser le fichier uploadé s'il existe
+                        elif audio_file:
+                            data_to_transcribe = audio_file.read()
+                            logging.info(
+                                f"Utilisation de l'audio depuis le fichier uploadé: {len(data_to_transcribe)} bytes")
+
+                        if data_to_transcribe:
+                            # Déterminer si on force le traitement asynchrone pour les gros fichiers
+                            file_size_mb = len(data_to_transcribe) / (1024 * 1024)
+                            force_async = file_size_mb > 1000
+
+                            if force_async and not use_async:
+                                st.info(
+                                    f"Traitement asynchrone automatiquement activé pour ce fichier volumineux ({file_size_mb:.1f} MB)")
+                                use_async = True
+
+                            # Estimation du temps de traitement pour les gros fichiers
+                            if file_size_mb > 500:
+                                est_minutes = estimate_processing_time(file_size_mb, whisper_model)
+                                st.info(
+                                    f"Temps de traitement estimé: environ {est_minutes} minutes. Vous pouvez quitter cette page et revenir plus tard.")
+
+                            # Continuer avec le traitement comme avant...
+                            if use_async:
+                                success, message = process_transcription_async(
+                                    data_to_transcribe,
+                                    whisper_model,
+                                    translate_checkbox
+                                )
+                            else:
+                                success, message = process_transcription_sync(
+                                    data_to_transcribe,
+                                    whisper_model,
+                                    translate_checkbox
+                                )
+
+                            if success:
+                                st.success(message)
+                                # Si transcription réussie, effacer l'audio temporaire de la session
+                                set_session_value("audio_bytes_for_transcription", None)
+                            else:
+                                st.error(message)
+                        else:
+                            st.error(
+                                "Aucun audio à transcrire. Veuillez charger un fichier audio ou extraire depuis YouTube.")
             else:
                 st.error("Erreur de session. Veuillez vous reconnecter.")
 
@@ -759,8 +1406,7 @@ def afficher_page_4():
                     del st.session_state["transcription_task_id"]
                     st.rerun()
 
-    # Implémentation des autres onglets... (Résumé, Mots-clés, Questions/Réponses, Chapitres)
-    # [Inclure le code existant pour les autres onglets ici]
+    # Implémentation des autres onglets (Résumé, Mots-clés, Questions/Réponses, Chapitres)
     with tabs[1]:  # Onglet Résumé
         st.subheader("💡 Résumé de la transcription")
 
@@ -797,7 +1443,7 @@ def afficher_page_4():
             # Choix du mode de prompt
             mode = st.radio(
                 "Sélectionnez le mode de prompt",
-                ["Prompt personnalisé", "Utiliser les évènements ci-dessus"]
+                ["Prompt personnalisé", "Utiliser les styles prédéfinis"]
             )
 
             if mode == "Prompt personnalisé":
@@ -915,7 +1561,7 @@ def afficher_page_4():
                 index=0,
                 format_func=model_format_func,
                 help="Sélectionnez le modèle GPT à utiliser",
-                key = "model_choose"
+                key="model_choose"
             )
 
         with col2:

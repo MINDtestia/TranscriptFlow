@@ -77,6 +77,7 @@ def extract_audio_from_mp4(file_path: str) -> str:
             '-acodec', 'pcm_s16le',
             '-ar', '44100',
             '-ac', '2',
+            '-compression_level', '8',
             audio_path
         ]
         subprocess.run(cmd, check=True)

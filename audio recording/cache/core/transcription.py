@@ -165,3 +165,18 @@ def optimize_whisper_performance():
     os.environ["WHISPER_USE_FP16"] = "0"
 
 # Appelez cette fonction au début de transcribe_or_translate_locally
+def optimize_memory_for_large_files():
+    """Configure le système pour gérer de gros fichiers"""
+    import gc
+
+    # Forcer le garbage collection
+    gc.collect()
+
+    # Définir une limite basse pour déclencher le GC plus fréquemment
+    gc.set_threshold(10000, 100, 10)
+
+    # Limiter le nombre de threads OpenMP pour Whisper
+    os.environ["OMP_NUM_THREADS"] = "2"
+
+    # Utiliser le CPU pour les gros fichiers
+    os.environ["WHISPER_FORCE_CPU"] = "1"

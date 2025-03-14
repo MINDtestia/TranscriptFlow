@@ -18,6 +18,7 @@ services:
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=4000
     volumes:
       - ./data:/app/data
     ports:

@@ -5,7 +5,7 @@ import streamlit as st
 
 # Définir le chemin de base du projet
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
+os.environ['STREAMLIT_SERVER_MAX_UPLOAD_SIZE'] = '4000'
 
 # Définition de la fonction is_mobile() AVANT son utilisation
 def is_mobile():
@@ -38,7 +38,9 @@ from core.database import Base, engine
 from core.auth_manager import login_user, register_user, logout_user
 from core.plan_manager import PlanManager
 from my_page.setting.account_settings import afficher_page_compte
+from numba.pycc import export
 
+#export STREAMLIT_SERVER_MAX_UPLOAD_SIZE=4000
 # Script de détection mobile côté client - après set_page_config
 device_detector = st.empty()
 device_detector.markdown("""

@@ -13,6 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     STREAMLIT_SERVER_PORT=8501 \
     STREAMLIT_SERVER_HEADLESS=true
 
+ENV STREAMLIT_SERVER_MAX_UPLOAD_SIZE=4096
 # Installer les dépendances système
 RUN apt-get update && apt-get install -y \
     ffmpeg \

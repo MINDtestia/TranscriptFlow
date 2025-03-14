@@ -39,6 +39,13 @@ def validate_video_file(file) -> bool:
     # Vérifier l'extension
     allowed_extensions = ['.mp4', '.mov', '.avi', '.mkv', '.wmv']
     file_ext = os.path.splitext(file.name)[1].lower()
+    # Vérifier la taille (max 500 MB) - AUGMENTER À 4000 MB
+    max_size_mb = 4000  # Modifié de 500 à 4000
+    file_size_mb = file.size / (1024 * 1024)
+
+    if file_size_mb > max_size_mb:
+        st.warning(f"Le fichier est trop volumineux ({file_size_mb:.1f} MB). Maximum: {max_size_mb} MB")
+        return False
 
     if file_ext not in allowed_extensions:
         st.warning(f"Format de fichier non supporté. Formats acceptés: {', '.join(allowed_extensions)}")
@@ -119,6 +126,52 @@ def extract_audio_with_progress(file) -> Optional[bytes]:
 
         return None
 
+def extract_audio_with_progress_from_path(file_path: str) -> Optional[bytes]:
+    """
+    Extrait l'audio d'un fichier vidéo avec barre de progression à partir d'un chemin de fichier.
+
+    Args:
+        file_path: Chemin du fichier sur le serveur
+
+    Returns:
+        Contenu audio en bytes ou None en cas d'erreur
+    """
+    if not os.path.exists(file_path):
+        st.error(f"Fichier non trouvé: {file_path}")
+        return None
+
+    try:
+        progress_bar = st.progress(0, "Préparation de l'extraction...")
+        progress_bar.progress(0.25, "Extraction audio en cours...")
+
+        # Extraire l'audio
+        audio_path = cached_extract_audio_from_mp4(file_path)
+
+        if isinstance(audio_path, str) and audio_path.startswith("ERROR"):
+            handle_error(Exception(audio_path), ErrorType.PROCESSING_ERROR,
+                        "L'extraction audio a échoué. Vérifiez le format du fichier.")
+            return None
+
+        progress_bar.progress(0.75, "Audio extrait, finalisation...")
+
+        # Lire le contenu audio
+        with open(audio_path, "rb") as audio_file:
+            audio_bytes = audio_file.read()
+
+        progress_bar.progress(1.0, "Extraction terminée!")
+
+        # Nettoyage du fichier audio temporaire
+        try:
+            os.remove(audio_path)
+        except Exception as e:
+            logging.warning(f"Erreur lors du nettoyage des fichiers temporaires: {e}")
+
+        return audio_bytes
+
+    except Exception as e:
+        handle_error(e, ErrorType.PROCESSING_ERROR,
+                    "Une erreur est survenue pendant l'extraction audio.")
+        return None
 
 def afficher_page_3():
     st.title("Extraction d'un fichier vidéo")
@@ -156,7 +209,75 @@ def afficher_page_3():
         key="video_uploader",
         help="Formats supportés: MP4, MOV, AVI, MKV, WMV. Taille maximale: 500 MB."
     )
+    # Après le file_uploader actuel, ajoutez ceci:
+    st.divider()
+    st.markdown("### Alternative pour fichiers volumineux (+200MB)")
 
+    server_file_path = st.text_input(
+        "Chemin du fichier sur le serveur:",
+        placeholder="/chemin/vers/votre/fichier.mp4",
+        help="Si le fichier est déjà présent sur le serveur, entrez son chemin absolu ici."
+    )
+
+    # Vérification et prévisualisation du fichier spécifié
+    if server_file_path:
+        if os.path.exists(server_file_path):
+            file_size_mb = os.path.getsize(server_file_path) / (1024 * 1024)
+            st.success(f"✅ Fichier trouvé: {os.path.basename(server_file_path)} ({file_size_mb:.2f} MB)")
+
+            # Prévisualisation avec ffmpeg si c'est une vidéo
+            if server_file_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
+                # Créer une miniature si possible
+                try:
+                    import subprocess
+                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                        thumbnail_path = tmp.name
+                    subprocess.run([
+                        'ffmpeg', '-y', '-i', server_file_path,
+                        '-ss', '00:00:01.000', '-vframes', '1',
+                        thumbnail_path
+                    ], check=True, capture_output=True)
+
+                    if os.path.exists(thumbnail_path):
+                        st.image(thumbnail_path, caption="Aperçu du fichier vidéo")
+                        os.unlink(thumbnail_path)
+                except:
+                    st.info("Aperçu non disponible")
+
+            # Bouton d'extraction
+            if st.button("Extraire l'audio depuis ce fichier", key="server_extract_btn", use_container_width=True):
+                audio_bytes = extract_audio_with_progress_from_path(server_file_path)
+
+                if audio_bytes:
+                    st.success("Extraction terminée avec succès ✅")
+                    st.audio(audio_bytes, format="audio/wav")
+
+                    # Options après extraction
+                    download_col, transcribe_col = st.columns([1, 1]) if not is_mobile else ([1])
+
+                    with download_col:
+                        st.download_button(
+                            label="Télécharger l'audio extrait",
+                            data=audio_bytes,
+                            file_name=f"{os.path.splitext(os.path.basename(server_file_path))[0]}.wav",
+                            mime="audio/wav",
+                            use_container_width=True
+                        )
+
+                    if is_mobile:
+                        if st.button("Passer à la transcription", use_container_width=True):
+                            set_session_value("audio_bytes_for_transcription", audio_bytes)
+                            set_session_value("selected_page", "Transcription")
+                            st.rerun()
+                    else:
+                        with transcribe_col:
+                            if st.button("Passer à la transcription", key="to_transcription_path_btn"):
+                                set_session_value("audio_bytes_for_transcription", audio_bytes)
+                                set_session_value("selected_page", "Transcription")
+                                st.rerun()
+        else:
+            st.error(f"❌ Fichier non trouvé: {server_file_path}")
+            st.info("Assurez-vous que le chemin est correct et que le fichier est accessible par l'application.")
     # Mettre à jour session_state
     set_session_value("uploaded_mp4", uploaded_file)
 
